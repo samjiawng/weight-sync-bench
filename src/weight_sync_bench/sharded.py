@@ -88,7 +88,7 @@ class GlooCollective:
     have length 1, because this process owns exactly one rank -- which is precisely
     why the ShardedModel forward body does not change between phases.
 
-    Requires an initialized process group; see `reshard_bench.distributed`.
+    Requires an initialized process group; see `weight_sync_bench.distributed`.
     """
 
     def __init__(self, rank: int, world_size: int) -> None:

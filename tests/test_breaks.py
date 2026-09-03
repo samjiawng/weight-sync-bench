@@ -33,9 +33,9 @@ import pytest
 import torch
 
 from helpers import CONFIGS, DEGREES, reference, tokens_for
-from reshard_bench.reshard import split_params
-from reshard_bench.sharded import InProcessCollective, ShardedModel
-from reshard_bench.shardspec import (
+from weight_sync_bench.reshard import split_params
+from weight_sync_bench.sharded import InProcessCollective, ShardedModel
+from weight_sync_bench.shardspec import (
     TOY,
     FusedPaired,
     HeadPartitioned,
@@ -46,7 +46,7 @@ from reshard_bench.shardspec import (
     build_layout_table,
     unrepresentable_roles,
 )
-from reshard_bench.tolerance import ARTIFACT, load, load_threshold
+from weight_sync_bench.tolerance import ARTIFACT, load, load_threshold
 
 THRESHOLD = load_threshold()
 

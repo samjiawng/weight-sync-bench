@@ -14,7 +14,7 @@ hand-picked.
 
 Regenerate with:
 
-    uv run python -m reshard_bench.tolerance
+    uv run python -m weight_sync_bench.tolerance
 
 The artifact is committed. Regenerate it after a torch or numpy upgrade, since the
 recorded environment is the threshold's provenance.
@@ -41,7 +41,7 @@ from .reshard import reshard, split_params
 from .sharded import InProcessCollective, ShardedModel
 from .shardspec import TOY, TOY_KV4, ModelConfig, build_layout_table, supported_degrees
 
-# Assumes a source checkout (the harness is installed editable). src/reshard_bench
+# Assumes a source checkout (the harness is installed editable). src/weight_sync_bench
 # -> src -> repo root.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ARTIFACT = REPO_ROOT / "tolerance" / "phase1a.json"
@@ -345,7 +345,7 @@ def load(path: Path = ARTIFACT) -> dict[str, object]:
     if not path.exists():
         raise FileNotFoundError(
             f"{path} is missing. Regenerate with: "
-            "uv run python -m reshard_bench.tolerance"
+            "uv run python -m weight_sync_bench.tolerance"
         )
     return json.loads(path.read_text())
 

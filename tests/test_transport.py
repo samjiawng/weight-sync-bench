@@ -11,8 +11,8 @@ from __future__ import annotations
 import pytest
 
 from helpers import CONFIGS, DEGREES, tokens_for
-from reshard_bench.distributed import run_transport_cell
-from reshard_bench.tolerance import ARTIFACT_1B, load_threshold
+from weight_sync_bench.distributed import run_transport_cell
+from weight_sync_bench.tolerance import ARTIFACT_1B, load_threshold
 
 THRESHOLD = load_threshold(ARTIFACT_1B)
 

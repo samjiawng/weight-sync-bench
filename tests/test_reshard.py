@@ -8,7 +8,7 @@ sweep a real 4-way forward, qkv included. Degrees come from `supported_degrees`,
 so the sweep follows the config rather than a hardcoded list.
 
 The tolerance threshold is read from `tolerance/phase1a.json`, which is produced by
-`reshard_bench.tolerance` and committed. It is measured and derived, never
+`weight_sync_bench.tolerance` and committed. It is measured and derived, never
 hand-picked -- see that module.
 """
 
@@ -20,16 +20,16 @@ import pytest
 import torch
 
 from helpers import CONFIGS, DEGREES, reference, tokens_for
-from reshard_bench.reshard import gather_params, reshard, split_params
-from reshard_bench.sharded import InProcessCollective, ShardedModel
-from reshard_bench.shardspec import (
+from weight_sync_bench.reshard import gather_params, reshard, split_params
+from weight_sync_bench.sharded import InProcessCollective, ShardedModel
+from weight_sync_bench.shardspec import (
     TOY,
     TOY_KV4,
     ModelConfig,
     UnsupportedLayout,
     build_layout_table,
 )
-from reshard_bench.tolerance import (
+from weight_sync_bench.tolerance import (
     EnvironmentMismatch,
     derive_threshold,
     environment_mismatches,
@@ -38,7 +38,7 @@ from reshard_bench.tolerance import (
 )
 
 # Phase 1a acceptance threshold, measured. Regenerate with:
-#   uv run python -m reshard_bench.tolerance
+#   uv run python -m weight_sync_bench.tolerance
 THRESHOLD = load_threshold()
 
 ORDERED_PAIRS = [
@@ -185,7 +185,7 @@ def test_recorded_environment_matches_running_environment():
                 "tolerance/phase1a.json was measured under a different environment:\n  "
                 + "\n  ".join(mismatches)
                 + "\nThe threshold may no longer reflect this machine. Regenerate with:"
-                "\n  uv run python -m reshard_bench.tolerance"
+                "\n  uv run python -m weight_sync_bench.tolerance"
             ),
             stacklevel=2,
         )
@@ -199,7 +199,7 @@ def test_token_shape_matches_what_the_floor_was_measured_at(tokens):
     measurement = load()["measurement"]
     assert tuple(tokens.shape) == (measurement["batch"], measurement["seq_len"]), (
         "the invariant tests run on a different token shape than the tolerance floor "
-        "was measured at. Regenerate: uv run python -m reshard_bench.tolerance"
+        "was measured at. Regenerate: uv run python -m weight_sync_bench.tolerance"
     )
 
 
@@ -211,7 +211,7 @@ def test_config_geometry_matches_what_the_floor_was_measured_at():
     for name, config in CONFIGS.items():
         assert recorded[name] == dataclasses.asdict(config), (
             f"config {name!r} has changed since the floor was measured. "
-            "Regenerate: uv run python -m reshard_bench.tolerance"
+            "Regenerate: uv run python -m weight_sync_bench.tolerance"
         )
 
 

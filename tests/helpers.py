@@ -6,8 +6,8 @@ import functools
 
 import torch
 
-from reshard_bench.model import ReferenceModel
-from reshard_bench.shardspec import TOY, TOY_KV4, ModelConfig, supported_degrees
+from weight_sync_bench.model import ReferenceModel
+from weight_sync_bench.shardspec import TOY, TOY_KV4, ModelConfig, supported_degrees
 
 CONFIGS: dict[str, ModelConfig] = {"kv2": TOY, "kv4": TOY_KV4}
 DEGREES = {name: supported_degrees(config) for name, config in CONFIGS.items()}

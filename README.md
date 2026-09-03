@@ -176,8 +176,8 @@ running config geometry and token shape are asserted against the recorded values
 mismatch. `median_ulp` and `mean_ulp` are recorded per cell because they do not saturate.
 
 ```
-uv run python -m reshard_bench.tolerance              # tolerance/phase1a.json
-uv run python -m reshard_bench.tolerance --phase 1b   # tolerance/phase1b.json
+uv run python -m weight_sync_bench.tolerance              # tolerance/phase1a.json
+uv run python -m weight_sync_bench.tolerance --phase 1b   # tolerance/phase1b.json
 ```
 
 Artifacts record torch, numpy, python, platform, dtype and commit.
@@ -224,7 +224,7 @@ the observed shards.
 ## Modules
 
 ```
-src/reshard_bench/
+src/weight_sync_bench/
   shardspec.py    placements, ShardSpec, LayoutTable, UnsupportedLayout
   model.py        ReferenceModel
   sharded.py      ShardedModel, InProcessCollective, GlooCollective

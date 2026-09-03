@@ -25,7 +25,7 @@ way regardless of what phase 2 needs:
 
     uv venv --python 3.12 .venv-phase2
     uv pip install --python .venv-phase2 -e . vllm==0.28.0 safetensors huggingface-hub
-    .venv-phase2/bin/python -m reshard_bench.phase2.bf16_floor --repetitions 5 --batch 2 --seq-len 8
+    .venv-phase2/bin/python -m weight_sync_bench.phase2.bf16_floor --repetitions 5 --batch 2 --seq-len 8
 
 Sourced facts this module depends on (vLLM v0.28.0, github.com/vllm-project/vllm):
 
@@ -125,7 +125,7 @@ from pathlib import Path
 from typing import Any
 
 # Everything below that touches torch/vllm/safetensors is imported lazily inside
-# functions, not at module scope, so `import reshard_bench.phase2.bf16_floor` for
+# functions, not at module scope, so `import weight_sync_bench.phase2.bf16_floor` for
 # its constants/CLI does not require the phase2 extra to be installed.
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -389,7 +389,7 @@ def _spawn_worker(
         [
             python,
             "-m",
-            "reshard_bench.phase2.bf16_floor",
+            "weight_sync_bench.phase2.bf16_floor",
             "--worker",
             "--model-dir",
             str(model_dir),

@@ -282,7 +282,7 @@ phase 2.
 weight-sync-bench/
   README.md
   pyproject.toml
-  src/reshard_bench/
+  src/weight_sync_bench/
     model.py        # ReferenceModel
     sharded.py      # ShardedModel, collectives
     shardspec.py    # Placement sum type, ShardSpec, layout tables

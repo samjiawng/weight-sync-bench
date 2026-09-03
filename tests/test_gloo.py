@@ -16,8 +16,8 @@ from __future__ import annotations
 import pytest
 
 from helpers import CONFIGS, DEGREES, tokens_for
-from reshard_bench.distributed import run_cell
-from reshard_bench.tolerance import (
+from weight_sync_bench.distributed import run_cell
+from weight_sync_bench.tolerance import (
     ARTIFACT,
     ARTIFACT_1B,
     derive_threshold,
