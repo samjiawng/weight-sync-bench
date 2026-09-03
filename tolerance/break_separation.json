@@ -1,0 +1,96 @@
+{
+  "phase": "1a",
+  "note": [
+    "Observed max absolute logit deviation for each injected layout bug, against the phase 1a tolerance threshold. Every break here is shape-preserving: execution completes and only the numbers are wrong.",
+    "Compare against tolerance/phase1a.json, whose max_deviation is the correct-path floor. Regenerate with: RESHARD_RECORD_BREAKS=1 uv run pytest tests/test_breaks.py"
+  ],
+  "threshold": 0.001,
+  "measured_floor": 1.6689300537109375e-06,
+  "min_separation_factor": 100.0,
+  "breaks": [
+    {
+      "case": "1: contiguous qkv slice",
+      "config": "kv2",
+      "tp_degree": 2,
+      "deviation": 2.314,
+      "x_threshold": 2313
+    },
+    {
+      "case": "1: contiguous qkv slice",
+      "config": "kv4",
+      "tp_degree": 2,
+      "deviation": 2.279,
+      "x_threshold": 2279
+    },
+    {
+      "case": "1: contiguous qkv slice",
+      "config": "kv4",
+      "tp_degree": 4,
+      "deviation": 2.098,
+      "x_threshold": 2097
+    },
+    {
+      "case": "2: down rank misassignment",
+      "config": "kv2",
+      "tp_degree": 2,
+      "deviation": 1.143,
+      "x_threshold": 1142
+    },
+    {
+      "case": "2: down rank misassignment",
+      "config": "kv4",
+      "tp_degree": 2,
+      "deviation": 1.305,
+      "x_threshold": 1304
+    },
+    {
+      "case": "2: down rank misassignment",
+      "config": "kv4",
+      "tp_degree": 4,
+      "deviation": 1.157,
+      "x_threshold": 1156
+    },
+    {
+      "case": "2: o_proj rank misassignment",
+      "config": "kv2",
+      "tp_degree": 2,
+      "deviation": 2.053,
+      "x_threshold": 2052
+    },
+    {
+      "case": "2: o_proj rank misassignment",
+      "config": "kv4",
+      "tp_degree": 2,
+      "deviation": 2.398,
+      "x_threshold": 2398
+    },
+    {
+      "case": "2: o_proj rank misassignment",
+      "config": "kv4",
+      "tp_degree": 4,
+      "deviation": 2.535,
+      "x_threshold": 2535
+    },
+    {
+      "case": "3: permuted norm weights",
+      "config": "kv2",
+      "tp_degree": 2,
+      "deviation": 0.3693,
+      "x_threshold": 369
+    },
+    {
+      "case": "3: permuted norm weights",
+      "config": "kv4",
+      "tp_degree": 2,
+      "deviation": 0.3383,
+      "x_threshold": 338
+    },
+    {
+      "case": "3: permuted norm weights",
+      "config": "kv4",
+      "tp_degree": 4,
+      "deviation": 0.4128,
+      "x_threshold": 412
+    }
+  ]
+}
