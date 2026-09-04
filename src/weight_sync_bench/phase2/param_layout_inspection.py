@@ -1,43 +1,51 @@
 """Phase 2b step 0 (SPEC.md "2b. Real layout tables"): inspect what vLLM
-actually holds in memory for Qwen3-0.6B at TP=1 and TP=2, before any
+actually holds in memory for Qwen3-0.6B at TP in {1, 2, 4}, before any
 `LayoutTable` is written. Inspection, not design -- this module reports; it
 does not decide what `HeadPartitioned` / `FusedPaired` / `Replicate()` should
-look like for Qwen3.
+look like for Qwen3. (`qwen3_layout.py`, built afterward once inspection's
+predictions were confirmed, is where those placements actually get assembled
+into a real `LayoutTable` -- see that module and `tolerance/phase2b_layout.json`.)
 
 --------------------------------------------------------------------------
-THIS WAS WRITTEN WITHOUT A GPU OR VLLM. TREAT IT AS UNVERIFIED UNTIL RUN.
+CONFIRMED, ON THE BOX, AT TP IN {1, 2, 4}. SPEC.md 2B'S DELIVERABLE IS MET.
 --------------------------------------------------------------------------
-The machine this module was written on has no CUDA device and no `vllm`
-install (`import vllm` raises `ModuleNotFoundError` there), so nothing in
-this module has been executed. Everything below the SOURCE READING heading
-is read from `github.com/vllm-project/vllm` at tag `v0.28.0`
-(`vllm/model_executor/layers/linear.py`, `vllm/model_executor/models/qwen3.py`,
-`vllm/model_executor/layers/layernorm.py`) and from `Qwen/Qwen3-0.6B`'s
-published `config.json`, not from a running process. `collective_logits.py`'s
-own docstring documents five separate cases, in this exact repo, where
-reading vLLM source to a plausible-looking stopping point produced a
-confident and wrong conclusion, caught only by running on the box. Nothing
-here is exempt from that risk. This module's whole job is to turn the
-predictions below into it-actually-ran findings; run it (`--worker` mode
-needs a GPU) before trusting any claim past this point in a report.
+This module was originally written on a machine with no CUDA device and no
+`vllm` install, entirely from reading `github.com/vllm-project/vllm` at tag
+`v0.28.0` and `Qwen/Qwen3-0.6B`'s published `config.json` (the SOURCE
+READING section below is that reading, left in place as the reasoning
+behind each prediction). It has SINCE BEEN RUN, on a real 4x
+A100-SXM4-80GB box (driver 580.159.04), at every TP degree this module
+tests -- see `tolerance/phase2b_layout.json` for the full recorded result:
+227/227 shape predictions matched at TP=1/2/4, and `reshard.split_tensor`
+applied to the real TP=1 tensor reproduced the real TP=2/TP=4 rank-local
+tensor bit-exactly for both `qkv_proj` and `gate_up_proj`, at every rank.
+Every "prediction"/"SOURCE READING" claim below should now be read as
+CONFIRMED unless a specific claim says otherwise -- `collective_logits.py`'s
+docstring's warning about source-reading-to-a-plausible-stopping-point
+being wrong in this exact repo is why this module existed to check these
+claims rather than skip straight to writing a `LayoutTable`; it is not a
+reason to keep re-deriving it now that the check has run and passed.
 
 --------------------------------------------------------------------------
 WHAT TO RUN
 --------------------------------------------------------------------------
-TP=1 needs one GPU, TP=2 needs two. Both legs need a real `vllm` install
-(see `bf16_floor.py`'s docstring for the pinned version / separate-env
-install command); there is no CPU path exercised or intended here, since the
-question under investigation is what vLLM's CUDA weight loader does, not
-what a CPU-only build would do instead -- a CPU run would not be inspecting
-the thing this module exists to inspect.
+TP=1 needs one GPU, TP=2 needs two, TP=4 needs four. Every leg needs a real
+`vllm` install (see `bf16_floor.py`'s docstring for the pinned version /
+separate-env install command); there is no CPU path exercised or intended
+here, since the question under investigation is what vLLM's CUDA weight
+loader does, not what a CPU-only build would do instead -- a CPU run would
+not be inspecting the thing this module exists to inspect.
 
     uv run python -m weight_sync_bench.phase2.param_layout_inspection
 
-runs both legs (each as its own subprocess, one GPU-process per TP degree,
-same pattern as `bf16_floor.measure_differential_floor`) and writes
-`tolerance/phase2b_param_layout.json`. `--tp {1,2} --worker` runs one leg
-standalone (used internally by the subprocess spawn; exposed for debugging a
-single leg without paying for both).
+runs every degree in `DEGREES` (currently `(1, 2, 4)`; each as its own
+subprocess, one GPU-process per TP degree, same pattern as
+`bf16_floor.measure_differential_floor`) and writes
+`tolerance/phase2b_param_layout.json`. `--tp {1,2,4} --worker` runs one leg
+standalone (used internally by the subprocess spawn; exposed for debugging
+a single leg without paying for all of them) -- `--tp` is REJECTED at the
+top level (without `--worker`): see `main()`'s comment for why that is not
+a bug to "fix" by honoring it there.
 
 --------------------------------------------------------------------------
 SOURCE READING: WHAT EACH PARAMETER IS PREDICTED TO LOOK LIKE
@@ -85,18 +93,22 @@ re-declared.
    materially different situation from phase 1's `TOY` config, which was
    deliberately built so `n_kv_heads=2` breaks at TP=4 (SPEC.md "GQA at
    TP=4"); real Qwen3-0.6B's `n_kv_heads=8` does not hit that wall until a
-   TP degree this repo has no plan to run. **Prediction: `HeadPartitioned`'s
+   TP degree this repo has no plan to run. **CONFIRMED BY EXECUTION, not just
+   this source reading** (`tolerance/phase2b_layout.json`): at TP=4 each rank
+   holds a distinct 4 Q heads and 2 KV heads (512+256+256=1024 local rows),
+   with no KV replication, and `reshard.split_tensor`'s prediction at that
+   shape matched the real per-rank tensor bit-exactly. `HeadPartitioned`'s
    `UnsupportedLayout` raise is real and correctly motivated by phase 1's
    toy config, but is not something 2b's actual `LayoutTable` for Qwen3 at
-   TP in {1,2,4} will ever need to raise** -- worth stating explicitly
-   rather than leaving as an unstated assumption, since it changes what "2b
-   validates the invariant at TP in {1,2,4}" actually has to cover.
+   TP in {1,2,4} ever needs to raise -- worth stating explicitly rather than
+   leaving as an unstated assumption, since it changes what "2b validates
+   the invariant at TP in {1,2,4}" actually has to cover.
 
    Each of q/k/v's contiguous-in-the-source-tensor head range is what
    `shard_rank * shard_size` selects -- rank `r`'s q shard is checkpoint
    q_proj rows `[r*q_local, (r+1)*q_local)`, a CONTIGUOUS range of that one
    source tensor, and likewise for k/v against their own source tensors.
-   **Prediction, the crux the task asked about:** relative to the checkpoint
+   **CONFIRMED, the crux the task asked about:** relative to the checkpoint
    (three separate tensors), each rank's shard of each of q/k/v is
    contiguous. Relative to vLLM's OWN fused representation -- which is
    exactly what TP=1's `qkv_proj.weight` already materializes, a single
@@ -115,14 +127,24 @@ re-declared.
    SHAPE of that per-rank fusion is exactly "select this rank's contiguous
    head-block from each of q, k, v, then concatenate in q/k/v order," which
    is precisely what `HeadPartitioned` + a q/k/v-boundary-aware fused
-   layout already models. `slice_hashes` below exists to turn this
-   paragraph from a source-reading claim into a measured one: it hashes
-   each individual head's row-block on both the TP=1 buffer and each TP=2
-   rank's local buffer, so `_compare` can assert per-head bit-identity
-   across TP degrees without ever transporting a multi-MB tensor over
-   `collective_rpc` (contrast `collective_logits.py`'s Q7 byte-buffer
-   workaround, needed there only because a full logits tensor had to cross
-   the wire -- a 32-byte hex digest needs no such handling).
+   layout already models. This is what turned into `qwen3_layout.py`'s
+   `check_content_predictions`, which measures it directly rather than by
+   proxy: `reshard.split_tensor` (this repo's own resharder, unmodified) is
+   called on the REAL TP=1 tensor with the `HeadPartitioned` `ShardSpec`
+   this paragraph describes, and its output is compared `torch.equal`
+   against the REAL TP=N rank-local tensor -- confirmed bit-exact at every
+   rank, TP=2 and TP=4 (`tolerance/phase2b_layout.json`). An earlier
+   revision of this module took a different, weaker route to the same
+   check -- hashing each head's row-block via `slice_hashes` on both sides
+   and comparing digests, a second hand-derived implementation of the same
+   row arithmetic compared against a third -- removed once
+   `check_content_predictions` existed to call the actual resharder instead
+   of re-deriving its arithmetic. `raw_param_bytes` (below) is what replaced
+   `slice_hashes` for these two parameters: it moves the real tensor across
+   `collective_rpc` (the same byte-buffer shape as `collective_logits.py`'s
+   Q7 workaround) so `check_content_predictions` has real bytes to call
+   `split_tensor` on, not a digest of them. `slice_hashes` remains in use
+   for `q_norm`/`k_norm`, where a hash IS the right tool (see point 3).
 
 2. **`gate_up_proj` fusion** (`linear.py:639-833`,
    `MergedColumnParallelLinear`). Same shape of finding: checkpoint stores
@@ -143,39 +165,42 @@ re-declared.
    parameter classes set but plain `nn.Parameter` never does). No
    `weight_loader` on a parameter means vLLM's generic loader falls back to
    `default_weight_loader`, a full `param.data.copy_(loaded_weight)` with a
-   shape assert -- no narrowing, no `tp_rank`-dependent offset. **Prediction:
+   shape assert -- no narrowing, no `tp_rank`-dependent offset. **CONFIRMED:
    `q_norm.weight` and `k_norm.weight` are `[128]`, IDENTICAL bytes on every
-   rank, at every TP degree** -- genuinely `Replicate()`, not merely
-   "effectively" so. `report_parameters` checks `hasattr(weight,
+   rank, at every TP degree tested (1, 2, 4)** -- genuinely `Replicate()`,
+   not merely "effectively" so. `report_parameters` checks `hasattr(weight,
    "output_dim")` / `hasattr(weight, "input_dim")` on every parameter
-   (present on the parallel-linear layers' weights, predicted absent on
-   every `RMSNorm.weight`) as the direct, structural version of this claim,
-   and `slice_hashes` on `q_norm.weight`/`k_norm.weight` with a single
-   whole-tensor range at TP=1 vs. each TP=2 rank turns "identical bytes on
-   every rank" into a checked hash-equality rather than a re-assertion of
-   the same source-reading claim.
+   (present on the parallel-linear layers' weights, absent on every
+   `RMSNorm.weight`, confirmed) as the direct, structural version of this
+   claim, and `slice_hashes` on `q_norm.weight`/`k_norm.weight` with a
+   single whole-tensor range at TP=1 vs. every rank at TP=2 and TP=4 turned
+   "identical bytes on every rank" into a checked hash-equality
+   (`tolerance/phase2b_layout.json`), not a re-assertion of the same
+   source-reading claim.
 
-   **On the open question in SPEC.md 2b** ("does QK-norm need a new
+   **CLOSED: the open question in SPEC.md 2b** ("does QK-norm need a new
    placement, or degenerate `HeadPartitioned`, given it's replicated within
-   a head-sharded computation"): if this prediction holds, `q_norm`/`k_norm`
-   need nothing new. The resharder (`reshard.py`) dispatches purely on
+   a head-sharded computation"). Decided: **`Replicate()` is sufficient, no
+   new placement.** The resharder (`reshard.py`) dispatches purely on
    `Placement` and moves BYTES between TP degrees; a `Replicate()` tensor
    whose content never depends on TP degree (same `[128]` weight vector
-   regardless of how many heads a rank owns) reshards as a no-op between any
-   two degrees -- gather-then-rescatter of a value already identical
-   everywhere. The "applied per head, same vector reused across heads"
-   fact lives entirely in `Qwen3Attention.forward` (`qwen3.py:161-165`,
+   regardless of how many heads a rank owns -- now confirmed identical
+   across TP in {1,2,4}, not just at one degree) reshards as a no-op
+   between any two degrees -- gather-then-rescatter of a value already
+   identical everywhere. The "applied per head, same vector reused across
+   heads" fact lives entirely in `Qwen3Attention.forward` (`qwen3.py:161-165`,
    reshape-then-normalize over the head axis), which is CONSUMER code, not
    layout data -- the resharder never needs to know a `Replicate()` tensor
    is "head-associated" because nothing about moving its bytes between TP
-   degrees changes when the number of heads per rank changes. This narrows
-   the open question to: is there ever a `LayoutTable` consumer other than
-   the resharder that would need "this replicated tensor is conceptually
-   per-head" recorded explicitly? Nothing in phase 1's `ShardSpec`/
-   `LayoutTable` reads placements for anything except resharding, so
-   the answer, ON CURRENT EVIDENCE, is no new placement needed -- but this
-   is exactly the kind of claim this module exists to check before writing
-   it into a `LayoutTable`, not to assert from source alone.
+   degrees changes when the number of heads per rank changes. This settles
+   the open question: there is no `LayoutTable` consumer other than the
+   resharder that would ever need "this replicated tensor is conceptually
+   per-head" recorded explicitly -- nothing in phase 1's `ShardSpec`/
+   `LayoutTable` reads placements for anything except resharding. Decided,
+   not merely inferred from source: `qwen3_layout.py`'s `LayoutTable` for
+   Qwen3 places `q_norm`/`k_norm` as plain `Replicated()`, and
+   `tolerance/phase2b_layout.json` is the confirmation this decision rests
+   on.
 
 4. **`o_proj` / `down_proj`** (`RowParallelLinear`, standard phase-1-shaped
    `Shard(1)` / row-parallel: each rank narrows the INPUT dim contiguously,

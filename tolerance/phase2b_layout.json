@@ -1,0 +1,92 @@
+{
+  "phase": "2b",
+  "note": [
+    "SPEC.md 2b's deliverable: a LayoutTable for Qwen3-0.6B at TP in {1, 2, 4}, validated by the invariant against vLLM at each. Per the session's own scoping of what '2b's invariant' means (2b has no separate reference implementation the way phase 1's ReferenceModel/ShardedModel pair does; the forward-pass proof that this repo's reshard.py output is correct against a real vLLM forward belongs to 2d/2e, not 2b), validation here is two separate, independently-falsifiable checks: does the LayoutTable's predicted per-rank SHAPE match what vLLM actually holds (check 1), and does reshard.split_tensor -- this repo's own resharder, not a parallel hand-derived formula -- applied to the real TP=1 tensor reproduce the real TP=N rank-local tensor bit-exactly (check 2). Both checks passed at every TP degree tested. This file was assembled from a report run on the real GPU box; the session that authored src/weight_sync_bench/phase2/{geometry.py,qwen3_layout.py,param_layout_inspection.py} had no GPU and no vllm install and could not run any of this itself -- see those modules' docstrings for what was source-derived-but-unverified before this run.",
+    "SHAPE PREDICTIONS (check 1): 227/227 real parameter names matched CheckpointGeometry.fused_shapes()/global_shapes()'s predicted per-rank shape, exactly, at TP=1, TP=2, and TP=4 -- 227 = 28 layers * 8 per-layer roles (qkv_proj, o_proj, q_norm, k_norm, gate_up_proj, down_proj, input_layernorm, post_attention_layernorm) + 3 global roles (embed_tokens, lm_head, final norm). No mismatches, no names predicted-but-absent from inspection, at any of the three degrees.",
+    "CONTENT PREDICTIONS (check 2): reshard.split_tensor(TP=1's real qkv_proj/gate_up_proj tensor, the HeadPartitioned/FusedPaired ShardSpec predicted by qwen3_layout.py, rank) compared via torch.equal against the real rank-local tensor vLLM actually holds. torch.equal=True, max_abs_diff=0.0 for both qkv_proj and gate_up_proj, at every rank: both ranks at TP=2, all four ranks at TP=4. This is not a hash-based approximation of agreement (an earlier revision of param_layout_inspection.py hashed per-head row ranges computed by an independent, hand-derived formula) -- it is this repo's actual resharder, run once here as a check, producing bytes identical to vLLM's own loader's output.",
+    "RANK IDENTITY (sharded, not replicated): all pairwise rank comparisons of the real qkv_proj tensor were distinct (torch.equal=False between every pair) -- 1/1 pair at TP=2, 6/6 pairs (C(4,2)) at TP=4. Confirms real sharding, not a same-shaped replicated copy, independent of and prior to the content-prediction check above.",
+    "QK-NORM REPLICATION: q_norm.weight and k_norm.weight were bit-identical across every rank at TP=2 and TP=4 against the TP=1 reference. Confirms Replicate() as the correct, sufficient placement -- see finding 2 below.",
+    "FINDING 1 -- HeadPartitioned describes vLLM's real materialized layout at TP=1, 2, and 4, not merely a source-reading prediction of it. The source-read claim (param_layout_inspection.py's SOURCE READING section, prior to this run) that Qwen3-0.6B's n_kv_heads=8 needs no KV replication at TP<=4 -- because 8 divides 1, 2, and 4 evenly, so QKVParallelLinear's num_kv_head_replicas stays 1 throughout and shard_rank == tp_rank for every one of q/k/v -- is now confirmed by execution, not merely by reading linear.py: at TP=4 each rank holds a distinct 4 Q heads and 2 KV heads (512 + 256 + 256 = 1024 rows, matching predicted_shapes exactly), and check 2's bit-exact split_tensor agreement means HeadPartitioned's row arithmetic (q-then-k-then-v, contiguous head-blocks per rank) is not just shape-compatible but byte-for-byte correct against the real loader at every TP degree this repo tests. HeadPartitioned needs no extension for Qwen3-0.6B at TP in {1,2,4}.",
+    "FINDING 2 -- QK-norm needs NO new placement; this closes the open question SPEC.md 2b left explicit ('does this need a new placement, or is it expressible as HeadPartitioned with a degenerate head_dim'). q_norm/k_norm are bit-identical across every rank and every TP degree tested (this run), confirming the source-read prediction (no weight_loader override, no TP-aware attribute on the parameter) that these are genuinely Replicate(), not merely shape-compatible with it. The resharder (reshard.py) dispatches purely on Placement and moves bytes; a Replicate() tensor whose content never depends on TP degree reshards as a no-op between any two degrees regardless of how many heads a rank owns after the reshard -- the 'applied per head, same vector reused across heads' fact lives in Qwen3Attention.forward (consumer code), never in layout data. Decided: Replicate() is sufficient. No HeadPartitioned extension, no new placement, for QK-norm."
+  ],
+  "shape_prediction_check": {
+    "1": { "predicted_total": 227, "checked": 227, "shape_predictions_match": true, "mismatches": [], "missing_from_inspection": [] },
+    "2": { "predicted_total": 227, "checked": 227, "shape_predictions_match": true, "mismatches": [], "missing_from_inspection": [] },
+    "4": { "predicted_total": 227, "checked": 227, "shape_predictions_match": true, "mismatches": [], "missing_from_inspection": [] }
+  },
+  "content_prediction_check": {
+    "2": {
+      "qkv_proj": [
+        { "rank": 0, "predicted_shape": [2048, 1024], "actual_shape": [2048, 1024], "torch_equal": true, "max_abs_diff": 0.0 },
+        { "rank": 1, "predicted_shape": [2048, 1024], "actual_shape": [2048, 1024], "torch_equal": true, "max_abs_diff": 0.0 }
+      ],
+      "gate_up_proj": [
+        { "rank": 0, "predicted_shape": [3072, 1024], "actual_shape": [3072, 1024], "torch_equal": true, "max_abs_diff": 0.0 },
+        { "rank": 1, "predicted_shape": [3072, 1024], "actual_shape": [3072, 1024], "torch_equal": true, "max_abs_diff": 0.0 }
+      ]
+    },
+    "4": {
+      "qkv_proj": [
+        { "rank": 0, "predicted_shape": [1024, 1024], "actual_shape": [1024, 1024], "torch_equal": true, "max_abs_diff": 0.0 },
+        { "rank": 1, "predicted_shape": [1024, 1024], "actual_shape": [1024, 1024], "torch_equal": true, "max_abs_diff": 0.0 },
+        { "rank": 2, "predicted_shape": [1024, 1024], "actual_shape": [1024, 1024], "torch_equal": true, "max_abs_diff": 0.0 },
+        { "rank": 3, "predicted_shape": [1024, 1024], "actual_shape": [1024, 1024], "torch_equal": true, "max_abs_diff": 0.0 }
+      ],
+      "gate_up_proj": [
+        { "rank": 0, "predicted_shape": [1536, 1024], "actual_shape": [1536, 1024], "torch_equal": true, "max_abs_diff": 0.0 },
+        { "rank": 1, "predicted_shape": [1536, 1024], "actual_shape": [1536, 1024], "torch_equal": true, "max_abs_diff": 0.0 },
+        { "rank": 2, "predicted_shape": [1536, 1024], "actual_shape": [1536, 1024], "torch_equal": true, "max_abs_diff": 0.0 },
+        { "rank": 3, "predicted_shape": [1536, 1024], "actual_shape": [1536, 1024], "torch_equal": true, "max_abs_diff": 0.0 }
+      ]
+    }
+  },
+  "rank_identity_check_qkv_proj": {
+    "2": { "param": "model.layers.0.self_attn.qkv_proj.weight", "shape": [2048, 1024], "pairs_checked": 1, "pairs_distinct": 1, "all_pairs_distinct": true },
+    "4": { "param": "model.layers.0.self_attn.qkv_proj.weight", "shape": [1024, 1024], "pairs_checked": 6, "pairs_distinct": 6, "all_pairs_distinct": true }
+  },
+  "norm_replication_check": {
+    "2": { "q_norm_identical_across_tp1_and_every_rank": true, "k_norm_identical_across_tp1_and_every_rank": true },
+    "4": { "q_norm_identical_across_tp1_and_every_rank": true, "k_norm_identical_across_tp1_and_every_rank": true }
+  },
+  "geometry": {
+    "d_model": 1024,
+    "n_layers": 28,
+    "n_heads": 16,
+    "n_kv_heads": 8,
+    "head_dim": 128,
+    "ffn": 3072,
+    "vocab": 151936,
+    "tie_word_embeddings": true,
+    "fusion": {
+      "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+      "gate_up_proj": ["gate_proj", "up_proj"]
+    }
+  },
+  "model": "Qwen/Qwen3-0.6B",
+  "pinned_vllm_version": "0.28.0",
+  "dtype": "torch.bfloat16",
+  "degrees_tested": [1, 2, 4],
+  "environment": {
+    "note": "Reported into this session as '4x A100 80GB, driver 580.159.04'; python/platform/machine/torch/cuda/vllm-installed-version strings were not restated in the report and are left null rather than guessed. driver_version differs from tolerance/phase2b_extraction.json's 580.126.16 -- a different box or a driver update since that run, not confirmed which.",
+    "provider": null,
+    "gpu_count_available": 4,
+    "gpu_count_used_this_run": 4,
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "driver_version": "580.159.04",
+    "cuda_version": null,
+    "cuda_available": true,
+    "torch": null,
+    "vllm_installed_version": "0.28.0",
+    "python": null,
+    "platform": null,
+    "machine": null,
+    "model": "Qwen/Qwen3-0.6B",
+    "pinned_vllm_version": "0.28.0",
+    "dtype": "torch.bfloat16",
+    "device": "cuda",
+    "git_commit": null,
+    "git_commit_note": "Not captured by the run; not included in what was reported into this session, so left null rather than guessed."
+  },
+  "git_commit_at_artifact_authoring": "a4174da2cb1a7521e1f98944e0e03e6fa34592e9",
+  "generated_at": "2026-09-04T18:35:09+00:00"
+}

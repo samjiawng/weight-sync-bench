@@ -77,11 +77,20 @@ fact (`lm_head.weight` present); `global_shapes(tp)` reports the in-memory
 fact (one tensor, referenced by two names) -- another instance of point 3
 above, checked rather than assumed.
 
-None of this -- `checkpoint_shapes()`'s formulas, or the loader-side
-predictions in `fused_shapes()`/`global_shapes()` -- has been checked
-against a running vLLM. `fused_shapes()`/`global_shapes()` are still
-GPU-verified nowhere; `qwen3_layout.py`'s module docstring states plainly
-what is and is not confirmed.
+`fused_shapes()`/`global_shapes()`'s loader-side predictions were, at the
+time the paragraph above was written, checked against nothing but vLLM
+source (linear.py's `weight_loader`/`weight_loader_v2`) -- unlike
+`checkpoint_shapes()`, which already had the safetensors-header check.
+**Since confirmed**: a real GPU run (`tolerance/phase2b_layout.json`) matched
+every `fused_shapes(tp)`/`global_shapes(tp)` prediction against vLLM's
+actual per-rank tensors at TP in {1, 2, 4} -- 227/227 parameter names,
+exact shape equality, no mismatches -- AND confirmed the predicted BYTES,
+not just shapes: `reshard.split_tensor` applied to the real TP=1 tensor
+reproduced the real TP=2/TP=4 rank-local tensor bit-exactly
+(`torch.equal`, `max_abs_diff=0.0`) for both `qkv_proj` and `gate_up_proj`,
+at every rank. See `qwen3_layout.py`'s module docstring and
+`tolerance/phase2b_layout.json` for the full record; SPEC.md 2b's
+deliverable is met.
 """
 
 from __future__ import annotations
@@ -150,13 +159,17 @@ class CheckpointGeometry:
     def fused_shapes(self, tp: int) -> dict[str, tuple[int, ...]]:
         """Post-loader, in-memory PER-RANK shapes at TP degree `tp`, for one
         representative layer -- what HeadPartitioned/FusedPaired actually
-        describe. UNVERIFIED against a running vLLM -- see qwen3_layout.py.
+        describe. CONFIRMED against a running vLLM at tp in {1,2,4}
+        (`tolerance/phase2b_layout.json`): every shape here matched exactly,
+        and reshard.split_tensor's output at these shapes matched the real
+        tensor bit-exactly too (see qwen3_layout.py).
 
         GQA replication (KV head count < tp) is NOT modeled -- raises if
         `n_kv_heads` doesn't divide `tp` evenly, the same condition
         `HeadPartitioned.validate` checks. For Qwen3-0.6B (n_kv_heads=8)
-        this never triggers at tp in {1,2,4}; it would first matter at
-        tp=16."""
+        this never triggers at tp in {1,2,4}; CONFIRMED by execution at
+        tp=4 specifically (4 Q heads + 2 KV heads per rank, bit-exact
+        against the real loader) -- it would first matter at tp=16."""
         if self.n_kv_heads % tp:
             raise ValueError(
                 f"n_kv_heads={self.n_kv_heads} not divisible by tp={tp}; "
@@ -180,7 +193,9 @@ class CheckpointGeometry:
 
     def global_shapes(self, tp: int) -> dict[str, tuple[int, ...]]:
         """Post-loader, in-memory per-rank shapes of the three global
-        (non-per-layer) tensors. UNVERIFIED against a running vLLM.
+        (non-per-layer) tensors. CONFIRMED against a running vLLM at
+        tp in {1,2,4} -- see `fused_shapes`'s docstring and
+        `tolerance/phase2b_layout.json`.
 
         `vocab // tp` is exact only because `vocab=151936` is already a
         multiple of both `tp` (for tp in {1,2,4}) and vLLM's own vocab

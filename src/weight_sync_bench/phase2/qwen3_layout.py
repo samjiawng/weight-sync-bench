@@ -1,9 +1,15 @@
 """Qwen3-0.6B `LayoutTable` at TP in {1, 2, 4}. SPEC.md 2b's deliverable.
 
-UNVERIFIED against a running vLLM -- see `geometry.py` and
-`param_layout_inspection.py` for what has and hasn't been checked so far.
-This module builds the table and the two prediction checks the box run
-verifies; it does not itself touch vLLM or a GPU.
+CONFIRMED against a running vLLM, on a real 4x A100-SXM4-80GB box
+(driver 580.159.04), at TP in {1, 2, 4}: both `check_shape_predictions` and
+`check_content_predictions` passed at every degree, with zero mismatches --
+see `tolerance/phase2b_layout.json` for the full record. SPEC.md 2b's
+deliverable ("a LayoutTable for Qwen3 at each TP degree in {1, 2, 4},
+validated by the invariant against vLLM at each") is met. This module
+itself still never touches vLLM or a GPU directly -- it builds the table
+and the two checks that `param_layout_inspection.py` runs against a real
+engine; the confirmation above is that run's result, recorded here and in
+the artifact, not something this module does at import time.
 
 --------------------------------------------------------------------------
 REUSES PHASE 1's TYPES UNCHANGED

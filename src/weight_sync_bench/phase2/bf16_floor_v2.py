@@ -102,6 +102,23 @@ WHAT'S DIFFERENT
 - New artifact path: `tolerance/phase2a_bf16_floor_v2.json`, not
   `tolerance/phase2a_bf16_floor.json` -- the old artifact is left exactly as
   it was measured and is not overwritten.
+- New: `--tp {1,2,4}` (was `{1,2}`, and was silently unread at the top level
+  -- every prior run of this module used TP=2 unconditionally regardless of
+  what `--tp` was passed, since only `--worker` mode ever consulted it) and
+  `--layer` (new; forwards to `corrupt_checkpoint`, which has always
+  accepted a `layer` argument -- no change there). `measure_differential_
+  floor`/`run_break_case`/`_measure_one_config` all take `tp`/`layer` now,
+  default `tp=2, layer=0` so every prior recorded run reproduces unchanged.
+  `--tp 4` checks SAFETY_FACTOR=15/GATE_MARGIN=2 at a third configuration
+  axis the two recorded separation-ratio bands (batch=2/seq_len=8 and
+  batch=4/seq_len=128, both TP=2 -- see the SAFETY_FACTOR comment in
+  bf16_floor.py) never covered; `--layer N` (N != 0) checks whether the
+  break cases' layer-0 hardcoding was a scope choice or a hidden dependency
+  (every layer shares the same geometry/placement, so a materially
+  different magnitude at another layer would be a finding, not expected).
+  Non-default `(tp, layer)` combinations write to a suffixed artifact path
+  (`_artifact_path`) rather than overwriting the canonical
+  `tolerance/phase2a_bf16_floor_v2.json` record.
 
 --------------------------------------------------------------------------
 SEQ_LEN SWEEP
@@ -231,7 +248,12 @@ def _spawn_worker(
 
 
 def measure_differential_floor(
-    repetitions: int, batch: int, seq_len: int, python: str = sys.executable, seed_base: int = 0
+    repetitions: int,
+    batch: int,
+    seq_len: int,
+    python: str = sys.executable,
+    seed_base: int = 0,
+    tp: int = 2,
 ) -> dict[str, Any]:
     """Same as bf16_floor.measure_differential_floor: downloads the real
     checkpoint once, runs each TP degree as its own subprocess (this
@@ -240,6 +262,13 @@ def measure_differential_floor(
     to both TP legs unchanged -- see `collective_logits._run_worker`'s
     docstring for what it shifts and why `seed_base=0` (the default)
     reproduces every artifact recorded before this parameter existed.
+
+    `tp` is the non-1 degree the TP=1 reference is diffed against -- default
+    2 reproduces every artifact recorded before this parameter existed
+    (`tolerance/phase2a_bf16_floor_v2.json`'s runs all implicitly used TP=2,
+    hardcoded). Passing `tp=4` checks the SAME threshold/statistic at a third
+    configuration axis the two recorded separation-ratio bands (batch=2/
+    seq_len=8 and batch=4/seq_len=128, both at TP=2) never covered.
     """
     import tempfile
 
@@ -251,15 +280,15 @@ def measure_differential_floor(
     cells: list[dict[str, float]] = []
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        tp1_path, tp2_path = tmp / "tp1.pt", tmp / "tp2.pt"
-        for tp, out_path in ((1, tp1_path), (2, tp2_path)):
-            _spawn_worker(python, checkpoint_dir, tp, repetitions, batch, seq_len, out_path, seed_base)
+        tp1_path, tpN_path = tmp / "tp1.pt", tmp / f"tp{tp}.pt"
+        for degree, out_path in ((1, tp1_path), (tp, tpN_path)):
+            _spawn_worker(python, checkpoint_dir, degree, repetitions, batch, seq_len, out_path, seed_base)
 
         tp1_reps = torch.load(tp1_path)
-        tp2_reps = torch.load(tp2_path)
+        tpN_reps = torch.load(tpN_path)
 
-        for tp1_logits, tp2_logits in zip(tp1_reps, tp2_reps):
-            diff = (tp2_logits - tp1_logits).abs()
+        for tp1_logits, tpN_logits in zip(tp1_reps, tpN_reps):
+            diff = (tpN_logits - tp1_logits).abs()
             cells.append(
                 {
                     "max": diff.max().item(),
@@ -291,15 +320,30 @@ def run_break_case(
     seq_len: int,
     python: str = sys.executable,
     seed_base: int = 0,
+    tp: int = 2,
+    layer: int = 0,
 ) -> dict[str, Any]:
     """Same as bf16_floor.run_break_case: corrupts a fresh copy of the
-    checkpoint (corrupt_checkpoint, unchanged, imported), loads it at TP=2
-    through this module's worker, and diffs against the TP1 reference.
-    `seed_base` must match the value `tp1_reference` was generated with, or
-    this is comparing draws from different tokens/model-seed state rather
-    than the same one under a genuine layout corruption -- `_measure_one_config`
-    passes the same `seed_base` to both, so this only matters if calling
-    `run_break_case` directly.
+    checkpoint (corrupt_checkpoint, unchanged, imported), loads it at TP
+    degree `tp` through this module's worker, and diffs against the TP1
+    reference. `seed_base` must match the value `tp1_reference` was generated
+    with, or this is comparing draws from different tokens/model-seed state
+    rather than the same one under a genuine layout corruption --
+    `_measure_one_config` passes the same `seed_base` to both, so this only
+    matters if calling `run_break_case` directly.
+
+    `tp` used to be hardcoded to 2 -- generalized so the break-case leg runs
+    at the SAME degree `measure_differential_floor` was called with, rather
+    than silently always TP=2 regardless of what the floor measurement used
+    (that mismatch would compare a break case injected at one degree against
+    a floor measured at another, which is not the differential this module
+    is for).
+
+    `layer` forwards to `corrupt_checkpoint` (which has always accepted it,
+    default 0 -- no change needed there). Every layer shares the same
+    geometry and placement (SPEC.md 2b), so a non-zero layer is expected to
+    produce a materially similar break magnitude to layer 0; this parameter
+    exists to check that expectation rather than assume it.
     """
     import tempfile
 
@@ -307,10 +351,10 @@ def run_break_case(
 
     with tempfile.TemporaryDirectory() as tmp:
         corrupted_dir = Path(tmp) / case
-        corrupt_checkpoint(checkpoint_dir, corrupted_dir, case)
+        corrupt_checkpoint(checkpoint_dir, corrupted_dir, case, layer=layer)
 
         out_path = Path(tmp) / f"{case}.pt"
-        _spawn_worker(python, str(corrupted_dir), 2, repetitions, batch, seq_len, out_path, seed_base)
+        _spawn_worker(python, str(corrupted_dir), tp, repetitions, batch, seq_len, out_path, seed_base)
         broken_reps = torch.load(out_path)
 
     cells = []
@@ -328,20 +372,36 @@ def run_break_case(
 
 
 def _measure_one_config(
-    repetitions: int, batch: int, seq_len: int, python: str = sys.executable, seed_base: int = 0
+    repetitions: int,
+    batch: int,
+    seq_len: int,
+    python: str = sys.executable,
+    seed_base: int = 0,
+    tp: int = 2,
+    layer: int = 0,
 ) -> dict[str, Any]:
     """Floor + all break cases + gate decision, for one (repetitions, batch,
-    seq_len). Factored out so both the single-config CLI path and
+    seq_len, tp, layer). Factored out so both the single-config CLI path and
     --sweep-seq-len share it. `seed_base=0` reproduces every artifact
     recorded before this parameter existed -- see
-    `collective_logits._run_worker`'s docstring.
+    `collective_logits._run_worker`'s docstring. `tp=2, layer=0` reproduces
+    every artifact recorded before those two parameters existed.
     """
-    floor = measure_differential_floor(repetitions, batch, seq_len, python, seed_base)
+    floor = measure_differential_floor(repetitions, batch, seq_len, python, seed_base, tp)
     tp1_reference = floor.pop("tp1_reference")
 
     break_results = [
         run_break_case(
-            case, floor["checkpoint_dir"], tp1_reference, repetitions, batch, seq_len, python, seed_base
+            case,
+            floor["checkpoint_dir"],
+            tp1_reference,
+            repetitions,
+            batch,
+            seq_len,
+            python,
+            seed_base,
+            tp,
+            layer,
         )
         for case in BREAK_CASES
     ]
@@ -353,11 +413,31 @@ def _measure_one_config(
             "batch": batch,
             "seq_len": seq_len,
             "seed_base": seed_base,
+            "tp": tp,
+            "layer": layer,
         },
         "floor": floor,
         "break_cases": break_results,
         "gate": gate,
     }
+
+
+def _artifact_path(tp: int, layer: int) -> Path:
+    """`ARTIFACT` (`tolerance/phase2a_bf16_floor_v2.json`) is the canonical
+    recorded file for the tp=2/layer=0 configuration every prior run of this
+    module used -- returned unchanged here so nothing about that file's path
+    or the meaning of a bare `write(report, ARTIFACT)` call changes. Any
+    OTHER (tp, layer) combination gets its own suffixed path instead of
+    silently overwriting that canonical record; `--tp 4` and `--layer 13`
+    runs are exploratory checks against the recorded bands, not replacements
+    for them.
+    """
+    if tp == 2 and layer == 0:
+        return ARTIFACT
+    suffix = "".join(
+        (f"_tp{tp}" if tp != 2 else "", f"_layer{layer}" if layer != 0 else "")
+    )
+    return ARTIFACT.with_name(ARTIFACT.stem + suffix + ARTIFACT.suffix)
 
 
 def main() -> None:
@@ -366,7 +446,29 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--model-dir", type=str, default=None)
-    parser.add_argument("--tp", type=int, default=1, choices=(1, 2))
+    # Default 2, not 1: unlike param_layout_inspection.py's --tp (which is
+    # genuinely dead at that module's top level, because that module always
+    # sweeps every degree together), THIS --tp is meaningful at the top
+    # level too -- it selects the one non-1 degree the differential and
+    # break cases run against, a single-degree-at-a-time granularity this
+    # module already has (one seq_len/batch per invocation, externally
+    # looped via --sweep-seq-len). The fix here is to wire it up, not
+    # reject it -- see the module docstring's TP degree note.
+    parser.add_argument("--tp", type=int, default=2, choices=(1, 2, 4))
+    parser.add_argument(
+        "--layer",
+        type=int,
+        default=0,
+        help=(
+            "Layer index the break-case corruption targets (forwarded to "
+            "bf16_floor.corrupt_checkpoint, which has always accepted this -- "
+            "no change needed there). Default 0 reproduces every artifact "
+            "recorded before this flag existed. Every layer shares the same "
+            "geometry and placement, so a non-zero layer is expected to "
+            "produce a materially similar break magnitude to layer 0; this "
+            "flag exists to check that, not assume it."
+        ),
+    )
     parser.add_argument("--repetitions", type=int, default=DEFAULT_REPETITIONS)
     parser.add_argument("--batch", type=int, default=DEFAULT_BATCH)
     parser.add_argument("--seq-len", type=int, default=DEFAULT_SEQ_LEN)
@@ -410,7 +512,14 @@ def main() -> None:
     if args.sweep_seq_len:
         seq_lens = [int(s) for s in args.sweep_seq_len.split(",")]
         results = [
-            _measure_one_config(args.repetitions, args.batch, seq_len, seed_base=args.seed_base)
+            _measure_one_config(
+                args.repetitions,
+                args.batch,
+                seq_len,
+                seed_base=args.seed_base,
+                tp=args.tp,
+                layer=args.layer,
+            )
             for seq_len in seq_lens
         ]
         report = {
@@ -423,11 +532,13 @@ def main() -> None:
                 "batch": args.batch,
                 "seq_lens": seq_lens,
                 "seed_base": args.seed_base,
+                "tp": args.tp,
+                "layer": args.layer,
             },
             "results": results,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        path = write(report, ARTIFACT)
+        path = write(report, _artifact_path(args.tp, args.layer))
 
         print(f"phase 2a bf16 floor sweep (collective_rpc extraction) -> {path}")
         for r in results:
@@ -439,7 +550,14 @@ def main() -> None:
             )
         return
 
-    result = _measure_one_config(args.repetitions, args.batch, args.seq_len, seed_base=args.seed_base)
+    result = _measure_one_config(
+        args.repetitions,
+        args.batch,
+        args.seq_len,
+        seed_base=args.seed_base,
+        tp=args.tp,
+        layer=args.layer,
+    )
     report = {
         "phase": "2a",
         "supersedes": SUPERSEDES_NOTE,
@@ -448,7 +566,7 @@ def main() -> None:
         **result,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    path = write(report, ARTIFACT)
+    path = write(report, _artifact_path(args.tp, args.layer))
 
     floor, gate = result["floor"], result["gate"]
     print(f"phase 2a bf16 floor (collective_rpc extraction) -> {path}")

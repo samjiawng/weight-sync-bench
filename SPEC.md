@@ -676,6 +676,22 @@ extension it needs rather than working around it in the resharder.
 Deliverable: a `LayoutTable` for Qwen3 at each TP degree in {1, 2, 4}, validated by the invariant
 against vLLM at each.
 
+**STATUS: MET.** `src/weight_sync_bench/phase2/{geometry.py,qwen3_layout.py}` build a real
+`LayoutTable` for Qwen3-0.6B at TP in {1, 2, 4} out of phase 1's unmodified `HeadPartitioned` /
+`FusedPaired` / `Replicated` / `Shard` / `ShardSpec` / `LayoutTable`, driven by a new
+`CheckpointGeometry` type (deliberately not `ModelConfig` -- see `geometry.py`'s docstring for why
+reusing the toy's config would leak its `n_heads*head_dim==d_model` assumption into the real-model
+path, which Qwen3-0.6B breaks: `16*128=2048 != 1024`). "Validated by the invariant against vLLM":
+2b has no separate reference implementation the way phase 1's `ReferenceModel`/`ShardedModel` pair
+does, so validation here is two independently-falsifiable checks, both run on a real 4x
+A100-SXM4-80GB box at TP in {1, 2, 4} (`tolerance/phase2b_layout.json`) -- shape prediction
+(227/227 real parameter names matched `CheckpointGeometry`'s predicted per-rank shape exactly, at
+every degree) and content prediction (`reshard.split_tensor` -- this repo's own resharder, not a
+parallel formula -- applied to the real TP=1 tensor reproduced the real TP=2/TP=4 rank-local
+tensor bit-exactly, `torch.equal`, for `qkv_proj` and `gate_up_proj`, at every rank). What remains
+for phase 2b is break-case reinjection through the real vLLM load path (see below); the
+layout-table deliverable itself needs no further work.
+
 **Two findings from 2a prep, confirmed against the real Qwen3-0.6B checkpoint (config.json and
 the safetensors header, not assumed), that change what 2b is:**
 
@@ -693,6 +709,16 @@ the safetensors header, not assumed), that change what 2b is:**
   checkpoint's unfused shape is only ever read, never placed. Do not assume which side the table
   describes; determine it from where the trainer-to-vLLM handoff actually needs a layout decision.
 
+  **RESOLVED (this is that determination):** `qwen3_layout.py`'s `LayoutTable` targets vLLM's
+  post-load fused representation exclusively (`qkv_proj`, `gate_up_proj`, real vLLM parameter
+  names) -- confirmed correct by the content-prediction check above, run against real fused
+  tensors. `CheckpointGeometry.checkpoint_shapes()` reports the checkpoint's unfused, on-disk
+  shapes (verified against the real safetensors header) but nothing ever builds a `Placement` or
+  `ShardSpec` from them; they exist to be read (e.g. by a future trainer-side checkpoint loader),
+  never placed. `HeadPartitioned`/`FusedPaired` needed no extension: `_check_fusion_matches_
+  placement_assumptions` (qwen3_layout.py) checks the geometry's stated fusion order against what
+  those placements hardcode before ever constructing them, and for Qwen3-0.6B it passes.
+
 - **Qwen3 applies a per-head RMSNorm to Q and K before RoPE** (`self_attn.q_norm.weight`,
   `self_attn.k_norm.weight`, each shape `[head_dim]`), **the same weight vector reused identically
   across every head.** This has no phase 1 analogue. It is replicated *within* a head (every
@@ -700,15 +726,25 @@ the safetensors header, not assumed), that change what 2b is:**
   weight) and simultaneously partitioned *across* heads in the sense that the whole point of
   `HeadPartitioned` is to say which heads a rank owns -- yet this weight does not vary by head at
   all, so "partitioned across heads" is vacuous for it even though it lives inside a
-  per-head-sharded computation. No existing `Placement` states this combination. **Open question
-  for 2b, not answered here:** does this need a new placement, or is it expressible as
-  `HeadPartitioned` with a degenerate `head_dim` (i.e. one norm vector shared by every head in the
-  group rather than one per head)? Leave it open until 2b actually has to represent it.
+  per-head-sharded computation. No existing `Placement` states this combination.
 
-  This question is untouched by the 2a break-case-ordering investigation above. That investigation
+  **CLOSED: `Replicate()` is sufficient. No new placement.** Confirmed on the box
+  (`tolerance/phase2b_layout.json`): `q_norm.weight`/`k_norm.weight` are bit-identical across
+  every rank and every TP degree tested (1, 2, 4), matching the source-level prediction that
+  neither carries a `weight_loader`/`output_dim` attribute and so is loaded by vLLM's generic
+  full-tensor-copy path with no TP-dependent narrowing. The resharder (`reshard.py`) dispatches
+  purely on `Placement` and moves bytes; a `Replicate()` tensor whose content never depends on TP
+  degree reshards as a no-op between any two degrees regardless of how many heads a rank owns
+  after the reshard. The "applied per head, same vector reused across heads" fact lives entirely
+  in `Qwen3Attention.forward`'s reshape-then-normalize (consumer code), never in layout data --
+  there is no `LayoutTable` consumer other than the resharder that would need "this replicated
+  tensor is conceptually per-head" recorded explicitly. `qwen3_layout.py`'s `LayoutTable` places
+  both as plain `Replicated()`.
+
+  This question was untouched by the 2a break-case-ordering investigation (that investigation
   confirmed `case3_norm_permute` injects into `model.layers.0.input_layernorm.weight` only --
-  `q_norm`/`k_norm` are never read or written by it. So nothing about QK-norm's placement was
-  exercised, measured, or ruled out by 2a; it remains exactly as open as stated here.
+  `q_norm`/`k_norm` are never read or written by it); the closure above comes from 2b's own
+  inspection run, not from anything 2a measured.
 
 ---
 
