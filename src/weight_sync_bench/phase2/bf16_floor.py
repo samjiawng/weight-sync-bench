@@ -119,14 +119,24 @@ import platform
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .geometry import QWEN3_0_6B  # noqa: F401 (re-exported; see below)
+
 # Everything below that touches torch/vllm/safetensors is imported lazily inside
 # functions, not at module scope, so `import weight_sync_bench.phase2.bf16_floor` for
 # its constants/CLI does not require the phase2 extra to be installed.
+#
+# `QWEN3_0_6B` (a `CheckpointGeometry`) used to be defined here as a
+# module-local `Qwen3Geometry` dataclass. Moved to geometry.py and given a
+# fusion-mapping field once SPEC.md 2b needed a type that could also predict
+# real per-rank LayoutTable shapes (see that module's docstring) -- nothing
+# in this file used the old class name, and no field this file reads was
+# renamed (`hidden_size` was renamed to `d_model`, but nothing here read
+# that field either), so this import is a pure relocation for every caller
+# of `QWEN3_0_6B` below.
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ARTIFACT = REPO_ROOT / "tolerance" / "phase2a_bf16_floor.json"
@@ -187,24 +197,6 @@ MIN_THRESHOLD = 1e-9
 # threshold by at least this multiple on mean deviation to count as "clears."
 # See the SAFETY_FACTOR comment above for why this is 2, not phase 1's 10.
 GATE_MARGIN = 2
-
-
-@dataclass(frozen=True)
-class Qwen3Geometry:
-    """Qwen/Qwen3-0.6B, as read from its published config.json and safetensors
-    header rather than assumed -- see the module docstring for the fetch."""
-
-    hidden_size: int = 1024
-    n_layers: int = 28
-    n_heads: int = 16
-    n_kv_heads: int = 8
-    head_dim: int = 128
-    ffn: int = 3072
-    vocab: int = 151936
-    tie_word_embeddings: bool = True
-
-
-QWEN3_0_6B = Qwen3Geometry()
 
 
 def derive_threshold(mean_deviation: float, safety_factor: int = SAFETY_FACTOR) -> float:
