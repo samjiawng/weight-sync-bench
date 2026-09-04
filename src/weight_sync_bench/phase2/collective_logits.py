@@ -2,17 +2,45 @@
 bf16_floor.py's prompt_logprobs full-vocab extraction path. SPEC.md phase 2,
 section 2a follow-up.
 
-UNTESTED. Written on a CPU-only dev machine against vLLM v0.28.0 source read
-directly from github.com/vllm-project/vllm at tag v0.28.0 (citations below
-give exact files/line ranges as they stood at that tag). It has not been run
-against a real GPU or a real vLLM install. Every vLLM API call in this module
-is unverified by execution -- read the citations, do not trust this file
-because it reads plausibly, and smoke-test with tiny repetitions/batch/seq_len
-before trusting any number out of it, same discipline as bf16_floor.py.
+UNTESTED (still, as of this revision). Written on a CPU-only dev machine
+against vLLM v0.28.0 source read directly from github.com/vllm-project/vllm
+at tag v0.28.0 (citations below give exact files/line ranges as they stood at
+that tag). It has not been run against a real GPU or a real vLLM install.
+Every vLLM API call in this module is unverified by execution -- read the
+citations, do not trust this file because it reads plausibly, and smoke-test
+with tiny repetitions/batch/seq_len before trusting any number out of it,
+same discipline as bf16_floor.py.
 
 `bf16_floor.py` is left completely unmodified. This module is additive, so the
 two extraction paths can be run side by side on the box and compared -- both
 for correctness (do they measure the same floor?) and for wall-clock cost.
+
+--------------------------------------------------------------------------
+HOW THIS REVISION CAME ABOUT, AND THE ONE MISTAKE BEHIND TWO OF ITS BUGS
+--------------------------------------------------------------------------
+The first version of this module failed on the box in two independent ways:
+`collective_rpc` rejected a raw function (TypeError, not serializable), and
+the runner-identity assertion below raised because the box was actually
+running the V2 model runner, not V1 as this module assumed.
+
+The second failure traces back to one root cause worth naming explicitly,
+because it produced a SECOND bug too: `vllm/config/vllm.py`'s
+`_is_default_v2_model_runner_model` was read up through its architecture
+allowlist check and treated as if that check were the whole answer, without
+reading down to its actual `return` statement -- which turns out to be
+`is_default_v2_architecture or not model_config.is_moe`, a materially
+different rule (see Q1). Reading a config-resolution function to a partial
+conclusion instead of to its return statement is the specific failure mode.
+It produced two bugs, not one: the wrong V1/V2 assumption itself, AND the
+runner-identity check meant to catch a wrong assumption
+(`type(runner).__name__ != "GPUModelRunnerV1"`) turned out to be broken by
+construction -- both V1's and V2's runner classes are literally named
+`GPUModelRunner` at their `class` statement (the "V1"/"V2" suffixes are local
+import aliases inside `gpu_worker.py` only), so that check would raise
+unconditionally regardless of which runner was actually active, for the wrong
+reason. Neither bug was caught by re-reading harder; both were caught by the
+box actually running the code. A source citation that stops before a
+function's return statement is not a citation of what the function does.
 
 --------------------------------------------------------------------------
 PROBLEM
@@ -41,12 +69,13 @@ itself:
      time just to get the values back into a tensor.
 
 --------------------------------------------------------------------------
-FOUR QUESTIONS, ANSWERED FROM SOURCE (v0.28.0, everything below is read from
+QUESTIONS, ANSWERED FROM SOURCE (v0.28.0, everything below is read from
 GitHub, not executed)
 --------------------------------------------------------------------------
 
-Q1. Entry point for a raw forward pass + logits; does it need hand-built
-    input batch metadata?
+Q1. Entry point for a raw forward pass + logits; which model runner is
+    actually active for Qwen3-0.6B; does it need hand-built input batch
+    metadata?
 
     `Qwen3ForCausalLM.compute_logits(self, hidden_states) -> torch.Tensor | None`
     (vllm/model_executor/models/qwen3.py:330-334):
@@ -55,93 +84,196 @@ Q1. Entry point for a raw forward pass + logits; does it need hand-built
             logits = self.logits_processor(self.lm_head, hidden_states)
             return logits
 
-    For Qwen3-0.6B at 0.28.0 with default settings, the worker's model runner
-    is `GPUModelRunnerV1` (vllm/v1/worker/gpu_model_runner.py), not the newer
-    `GPUModelRunnerV2` (vllm/v1/worker/gpu/model_runner.py). Verified by
-    tracing: `gpu_worker.py:425-438` branches
-    `GPUModelRunnerV2 if self.use_v2_model_runner else GPUModelRunnerV1`, and
-    `use_v2_model_runner` (vllm/config/vllm.py:615-666) falls through to
-    `_is_default_v2_model_runner_model()` (vllm/config/vllm.py:691-703), which
-    checks `model_config.architectures` against
-    `DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES` (vllm/config/vllm.py:69-79) --
+    This is shared code, identical regardless of which model runner drives
+    it -- the runner is an orchestration layer around the same model object,
+    not a different model. The model runner IS, however, load-bearing for
+    which call sites exist and how many times they call `compute_logits`
+    (design points 2-3 below), and it is CONFIG- AND MODEL-DEPENDENT which
+    one is active. This module got it wrong once (see the section above) and
+    now states the corrected trace in full, plus a runtime assertion instead
+    of a silently trusted assumption.
+
+    `gpu_worker.py:423-438` branches on `self.use_v2_model_runner`:
+
+        if self.use_v2_model_runner:
+            from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
+            self.model_runner: GPUModelRunner = GPUModelRunnerV2(self.vllm_config, self.device)
+        else:
+            from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
+            self.model_runner = GPUModelRunnerV1(self.vllm_config, self.device)
+
+    `use_v2_model_runner` (vllm/config/vllm.py:615-666) falls through, absent
+    an env override or a speculative-decoding/PCP special case (none apply
+    here), to `_is_default_v2_model_runner_model()`
+    (vllm/config/vllm.py:691-711):
+
+        architectures = getattr(model_config, "architectures", [])
+        default_architectures = default_v2_model_runner_architectures()
+        is_default_v2_architecture = any(arch in default_architectures for arch in architectures)
+        if getattr(model_config, "is_hybrid", False) and not is_default_v2_architecture:
+            return False
+        if getattr(model_config, "is_attention_free", False):
+            return False
+        return is_default_v2_architecture or not model_config.is_moe
+
+    `default_v2_model_runner_architectures()` (vllm/config/vllm.py:69-93) is
     `{"DeepseekV2ForCausalLM", "DeepseekV4ForCausalLM", "GraniteMoeForCausalLM",
     "InklingForCausalLM", "InklingForConditionalGeneration",
     "KimiK3ForConditionalGeneration", "LongcatFlashNgramForCausalLM",
-    "Qwen2MoeForCausalLM"}` -- "Qwen3ForCausalLM" is not in that set, so V1 is
-    used absent a `VLLM_USE_V2_MODEL_RUNNER=1` override. THIS ASSUMPTION IS
-    CHECKED AT RUNTIME below (`_install_logits_hook` asserts the runner's
-    class name) rather than silently trusted, since it is a config-dependent
-    branch this analysis cannot exercise.
+    "Qwen2MoeForCausalLM"}` -- "Qwen3ForCausalLM" is not in it, so
+    `is_default_v2_architecture` is False for Qwen3-0.6B. THE ALLOWLIST ONLY
+    DECIDES THE OUTCOME FOR MOE MODELS, though: the function's actual return
+    value is `is_default_v2_architecture or not model_config.is_moe`.
+    Qwen3-0.6B is a plain dense model (`model_config.is_moe` is False), so
+    `not model_config.is_moe` is True, and the whole expression is True --
+    V2 IS THE DEFAULT for Qwen3-0.6B, precisely because it is NOT MoE, not
+    despite it. The allowlist exists to let specific MoE architectures opt
+    IN to V2 despite being MoE; it says nothing about the default for
+    non-MoE models, which is V2 unconditionally (subject only to the
+    `is_hybrid`/`is_attention_free`/`runner_type` guards above it, none of
+    which Qwen3-0.6B trips). `use_v2_model_runner` then checks `HAS_TRITON`
+    and `_get_v2_model_runner_unsupported_features()`
+    (vllm/config/vllm.py:648-666) before finally returning True; nothing in
+    bf16_floor.py's or this module's configuration (no LoRA, no speculative
+    decoding, no unusual quantization) is expected to trip either of those,
+    consistent with the engine log actually observed on the box: `Using V2
+    Model Runner`.
+
+    ASSERTED AT RUNTIME, not just reasoned about: `install_logits_hook`
+    below checks `type(self.model_runner).__module__ ==
+    "vllm.v1.worker.gpu.model_runner"` and raises if not. Module, not
+    `__name__` -- both `vllm/v1/worker/gpu_model_runner.py` (V1) and
+    `vllm/v1/worker/gpu/model_runner.py` (V2) declare `class GPUModelRunner`
+    verbatim (gpu_model_runner.py:500, gpu/model_runner.py:158); `V1`/`V2`
+    are local import aliases inside `gpu_worker.py` only and never appear in
+    either class's real `__name__`. `__module__` is the only reliable
+    discriminator available at runtime, and it is what a future run of this
+    module on a config where V1 (or some future V3) is active will report in
+    the resulting RuntimeError, rather than silently mismeasuring.
 
     `compute_logits` is already called from exactly this raw-forward-pass
-    entry point inside the real engine loop, no synthetic construction needed:
-      - gpu_model_runner.py:5802, inside `_get_prompt_logprobs_dict`, once per
-        prompt-logprobs-enabled request, over every requested prompt position
-        in one call.
-      - gpu_model_runner.py:4600 / :4619, the main per-step path, over
-        whichever positions `logits_indices` selects (normally just the next
-        token to sample).
+    entry point inside the real V2 engine loop (vllm/v1/worker/gpu/model_runner.py,
+    class `GPUModelRunner`), no synthetic construction needed:
+      - gpu/model_runner.py:1340, inside `sample()` -- the main per-step
+        path, over whichever positions `input_batch.logits_indices` selects
+        (normally just the next token to sample).
+      - gpu/model_runner.py:1764, passed BY REFERENCE (not called directly
+        at that line) as the `logits_fn` argument to
+        `self.prompt_logprobs_worker.compute_prompt_logprobs(self.model.compute_logits,
+        hidden_states, input_batch, ...)` -- the prompt-logprobs path, see
+        design points 2-3 and Q6 for what actually happens inside
+        `compute_prompt_logprobs`.
+      - gpu/model_runner.py:773, inside `_dummy_sampler_run` -- called ONLY
+        during memory-profiling at `LLM()` construction time (its own
+        comment: "During the initial memory profiling..."), before this
+        hook is ever installed (design point 4 installs it via
+        `collective_rpc` after `LLM(...)` returns). Harmless: any captures
+        from this call site cannot exist in `self._collective_logits_captures`
+        because that list doesn't exist yet when it runs, so there is
+        nothing for it to pollute.
 
     Hand-building batch metadata (a `SchedulerOutput`, KV-cache block tables,
     attention-backend metadata) to call `execute_model()` standalone was
-    considered and rejected: that state is deeply `Scheduler`-internal and not
-    designed for standalone construction. Instead this design rides a REAL
-    `LLM.generate()` call -- the real `Scheduler` builds all of that exactly
-    as production does -- and intercepts the value at the point it is already
-    computed, by monkeypatching `compute_logits` on the worker's model
-    instance before calling `generate()`.
+    considered and rejected: that state is deeply `Scheduler`-internal and
+    not designed for standalone construction. Instead this design rides a
+    REAL `LLM.generate()` call -- the real `Scheduler` builds all of that
+    exactly as production does -- and intercepts the value at the point it
+    is already computed, by monkeypatching `compute_logits` on the worker's
+    model instance before calling `generate()`.
 
-Q2. `collective_rpc` signature, worker-side registration, return values.
+Q2. `collective_rpc` mechanics: what actually failed, and the supported fix.
 
-    Signature (unchanged across the whole call chain -- LLM.collective_rpc
-    (vllm/entrypoints/llm.py:567) -> LLMEngine.collective_rpc
-    (vllm/v1/engine/llm_engine.py:421) -> EngineCore.collective_rpc
-    (vllm/v1/engine/core.py:952) -> MultiprocExecutor.collective_rpc
-    (vllm/v1/executor/multiproc_executor.py:372)):
+    There are TWO IPC hops, not one, and the original version of this module
+    only accounted for the second:
 
-        def collective_rpc(
-            self,
-            method: str | Callable[..., _R],
-            timeout: float | None = None,
-            args: tuple = (),
-            kwargs: dict[str, Any] | None = None,
-        ) -> list[_R]
+      Hop A: the `LLM`'s own process <-> a separate `EngineCore` process,
+      over ZMQ, encoded with `MsgpackEncoder`/`MsgpackDecoder`
+      (vllm/v1/serial_utils.py). `LLM.collective_rpc`
+      (vllm/entrypoints/llm.py:567) -> `LLMEngine.collective_rpc`
+      (vllm/v1/engine/llm_engine.py:421) -> `EngineCoreClient` ->
+      `SyncMPClient.collective_rpc` (vllm/v1/engine/core_client.py:962-968),
+      which is `self.call_utility("collective_rpc", method, timeout, args,
+      kwargs)`. `call_utility` -> `_send_input` (core_client.py:884-890):
 
-    Worker-side dispatch (multiproc_executor.py:1026-1037,
-    `WorkerProc.worker_busy_loop`):
+          msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
 
-        if isinstance(method, str):
-            func = getattr(self.worker, method)
-        elif isinstance(method, bytes):
-            func = partial(cloudpickle.loads(method), self.worker)
-        output = func(*args, **kwargs)
+      `self.encoder` is a `MsgpackEncoder` (core_client.py:632). THIS is the
+      line the actual traceback cited (`core_client.py:890`).
 
-    A string names an existing bound method on the `Worker` object. A
-    callable is `cloudpickle.dumps`'d by the driver (multiproc_executor.py:416),
-    sent to every worker process, `cloudpickle.loads`'d and bound via
-    `functools.partial(fn, self.worker)` -- so a callable's first positional
-    argument is the `Worker` instance itself, matching `LLM.collective_rpc`'s
-    own docstring ("If the method is a callable, it should accept an
-    additional `self` argument... The `self` argument will be the worker
-    object.").
+      Hop B: the `EngineCore` process <-> each GPU worker process, over a
+      shared-memory `MessageQueue`, using cloudpickle for a callable method
+      or plain `getattr` for a string one (vllm/v1/executor/multiproc_executor.py,
+      `worker_busy_loop`, :1026-1037). This is the hop the original version
+      of this module analyzed and got right; it was never the problem.
 
-    Every rank runs the call and returns a result; `MultiprocExecutor`
-    collects one entry per rank into `list[_R]` (multiproc_executor.py:419-441,
-    `get_response` appends one result per `response_mqs` entry, in rank
-    order). `MultiprocExecutor.collective_rpc` also accepts a
-    `unique_reply_rank` parameter for a single-rank response, but that
-    parameter is NOT threaded through `EngineCore.collective_rpc` (core.py:952,
-    only forwards `method, timeout, args, kwargs`) or `LLMEngine`/`LLM` above
-    it -- so from a script holding an `LLM` instance, `unique_reply_rank` is
-    unreachable, and "only rank 0 has real data" has to be handled inside the
-    callable itself, not requested from the driver side.
+    THE ACTUAL FAILURE IS AT HOP A. `MsgpackEncoder.enc_hook`
+    (serial_utils.py:189-232) has explicit native handling for a fixed set
+    of types -- `torch.Tensor` (`_encode_tensor`), `numpy.ndarray`, `slice`,
+    `MultiModalKwargsItem(s)`, `UtilityResult` -- and ONLY for anything
+    outside that set does it fall through to:
+
+          if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+              raise TypeError(f"Object of type {type(obj)} is not serializable"
+                               "Set VLLM_ALLOW_INSECURE_SERIALIZATION=1 to allow "
+                               "fallback to pickle-based serialization.")
+
+      A plain Python function is not in that set, so passing one as `method`
+      raises exactly this, matching the observed error text precisely.
+      `VLLM_ALLOW_INSECURE_SERIALIZATION` gates BOTH `MsgpackEncoder`
+      (serial_utils.py:163, 214, 221-224) and `MsgpackDecoder`
+      (serial_utils.py:337, 370-372, 477) -- it has to be set on whatever
+      unpickles too, and it exists specifically to allow arbitrary
+      pickle/cloudpickle blobs to cross this boundary, which is a remote
+      code-execution surface if anything untrusted can reach it (hence
+      "insecure" in the name and the log line `_log_insecure_serialization_warning`
+      literally warning about it). NOT USED HERE, per instruction: the
+      env var was never the fix for the actual problem, only a workaround
+      for feeding it a shape (a raw function as `method`) it was never meant
+      to carry.
+
+      Return values are NOT the problem, and needed no change: `_encode_tensor`
+      is one of the natively-handled types (serial_utils.py:257-273) --
+      msgpack already carries CPU tensors (and lists/None of them, via
+      ordinary recursive encoding) across Hop A with no insecure flag
+      required. Only the `method` argument -- previously a raw function --
+      needed to change shape.
+
+    THE SUPPORTED MECHANISM: `worker_extension_cls`, an `EngineArgs`/
+    `ParallelConfig` string field (a dotted import path) that vLLM was built
+    for exactly this. `vllm/v1/worker/worker_base.py:265-291`:
+
+          if parallel_config.worker_extension_cls:
+              worker_extension_cls = resolve_obj_by_qualname(parallel_config.worker_extension_cls)
+              if worker_extension_cls not in worker_class.__bases__:
+                  for attr in dir(worker_extension_cls):
+                      if attr.startswith("__"):
+                          continue
+                      assert not hasattr(worker_class, attr), (...)
+                      ...
+                  worker_class.__bases__ = worker_class.__bases__ + (worker_extension_cls,)
+
+      The extension class is dynamically added as a BASE CLASS of `Worker`
+      at construction time, in each worker process. Every method it defines
+      becomes a real bound method on the worker instance -- dispatchable by
+      the plain STRING path (`getattr(self.worker, method)`,
+      multiproc_executor.py:1033), which is just a `str` and msgpack-encodes
+      trivially at Hop A. There is a collision guard
+      (`assert not hasattr(worker_class, attr)`) for every non-dunder
+      extension attribute, so a name clash with an existing `Worker`/
+      `WorkerBase` method fails loudly at `LLM()` construction, not
+      silently. This module's hook methods are now defined on
+      `LogitsHookWorkerExtension` below, and `LLM(...)` is passed
+      `worker_extension_cls="weight_sync_bench.phase2.collective_logits.LogitsHookWorkerExtension"`
+      in `_run_worker`. Calls are `llm.collective_rpc("install_logits_hook")`
+      etc. -- string names throughout, both hops.
 
 Q3. Under TP=2, does the worker already gather logits, or does each rank hold
     a vocab slice? all-gather-on-worker vs concatenate-on-driver?
 
     Already gathered, INSIDE `compute_logits` itself, and it is a gather to
-    one rank, not an all-gather. `vllm/model_executor/layers/logits_processor.py:
-    118-129` (`LogitsProcessor._gather_logits`):
+    one rank, not an all-gather. This is `LogitsProcessor` code, unrelated to
+    the model runner, so V1/V2 doesn't change it. `vllm/model_executor/layers/
+    logits_processor.py:118-129` (`LogitsProcessor._gather_logits`):
 
         if self.use_all_gather:
             logits = tensor_model_parallel_all_gather(logits)
@@ -160,15 +292,16 @@ Q3. Under TP=2, does the worker already gather logits, or does each rank hold
     concatenate ourselves. The hook simply captures whatever `compute_logits`
     returns on each rank: a real tensor on rank 0, `None` on every other rank,
     for free, as a consequence of vLLM's own internal gather. The retrieval
-    side (`_retrieve_and_clear_logits`) picks the one non-None result out of
+    side (`retrieve_and_clear_logits`) picks the one non-None result out of
     the list `collective_rpc` returns.
 
 Q4. How do return values cross the boundary? Must tensors move to CPU first?
 
-    Yes. Results are pickled through
-    `vllm.distributed.device_communicators.shm_broadcast.MessageQueue`, a
-    shared-memory ring buffer (`max_chunk_bytes` defaults to `1024*1024*24` =
-    24 MiB, shm_broadcast.py:472). Its `enqueue()` (shm_broadcast.py:823-860)
+    Yes, still, and this is unaffected by the worker_extension_cls change --
+    Hop B (EngineCore <-> worker process) is unchanged. Results are pickled
+    through `vllm.distributed.device_communicators.shm_broadcast.MessageQueue`,
+    a shared-memory ring buffer (`max_chunk_bytes` defaults to `1024*1024*24`
+    = 24 MiB, shm_broadcast.py:472). Its `enqueue()` (shm_broadcast.py:823-860)
     has a code path specifically for CPU tensors -- the comment there:
     "CPU tensors are routed through `_reduce_tensor` so that their bytes are
     emitted as out-of-band buffers instead of being copied into the pickle
@@ -178,15 +311,19 @@ Q4. How do return values cross the boundary? Must tensors move to CPU first?
     tensors get no such dedicated path in this code, and `collective_rpc`'s
     own docstring says: "It is recommended to use this API to only pass
     control messages, and set up data-plane communication to pass data."
-    Both point the same way: `.detach().cpu()` before returning from the
-    worker callable, done in `_install_logits_hook`'s wrapper below.
+    After crossing Hop B, the value also crosses Hop A (EngineCore -> `LLM`
+    process) via `MsgpackEncoder`, which per Q2 has native, secure support
+    for CPU tensors -- no additional handling needed there. Both hops point
+    the same way: `.detach().cpu()` before returning from the worker
+    extension method, done in `install_logits_hook`'s wrapper below.
 
 Q5. Does the CPU float32 cast in the hook happen after the bf16 computation,
     or does it change what dtype the computation itself runs in?
 
     After -- confirmed by reading the full call chain the hook wraps, from
     `compute_logits` down to the actual GEMM, with nothing in between that
-    would force fp32:
+    would force fp32. This is shared `LogitsProcessor`/model code, unrelated
+    to the model runner, so V1/V2 doesn't change it either:
       - `Qwen3ForCausalLM.compute_logits` (qwen3.py:330-334) calls
         `self.logits_processor(self.lm_head, hidden_states)`, i.e.
         `LogitsProcessor.forward` (logits_processor.py:97-115), which calls
@@ -210,11 +347,12 @@ Q5. Does the CPU float32 cast in the hook happen after the bf16 computation,
         tensor -- strictly a post-hoc upcast of a value bf16 arithmetic
         already produced, not a change to the arithmetic itself. Upcasting a
         bf16 result to fp32 is lossless (every bf16 value is exactly
-        representable in fp32) and matches what
-        gpu_model_runner.py:5812-5813 already does in the existing
-        prompt_logprobs path (`scores = logits.to(torch.float32)` under
-        `logprobs_mode="raw_logits"`) -- this hook measures the same
-        quantity, cast at the same point in the pipeline.
+        representable in fp32) and matches what the V1 runner's
+        `_get_prompt_logprobs_dict` (gpu_model_runner.py:5812-5813) already
+        does in the same situation (`scores = logits.to(torch.float32)`
+        under `logprobs_mode="raw_logits"`) -- V2's `PromptLogprobsWorker`
+        does the analogous thing (Q6). This hook measures the same
+        quantity, cast at the same point in the pipeline, on either runner.
       - One nearby method, `LogitsProcessor.get_top_tokens`
         (logits_processor.py:189-234), does upcast to float32 mid-computation
         ("Use float32 to avoid bf16 precision loss on large vocab indices")
@@ -224,48 +362,110 @@ Q5. Does the CPU float32 cast in the hook happen after the bf16 computation,
         `.float()` in this file does not mistake it for evidence against the
         above.
 
+Q6. Why is position 0 dropped, under the V2 runner that is actually active?
+
+    The original version of this module derived the position-0-drop
+    convention against `gpu_model_runner.py:5776-5786` (V1) and then, when
+    the runner assumption turned out wrong, that citation became a citation
+    of a file not in use. Re-derived here against the file actually active:
+    `vllm/v1/worker/gpu/sample/prompt_logprob.py`, `PromptLogprobsWorker.
+    compute_prompt_logprobs` and its helper `get_prompt_logprobs_token_ids`.
+
+    `compute_prompt_logprobs` builds `prompt_logprobs_token_ids` via a triton
+    kernel, `_prompt_logprobs_token_ids_kernel` (prompt_logprob.py), whose
+    body computes, per scheduled query position:
+
+        # NOTE(woosuk): We should shift the pos by one
+        # because the logprob is computed for the next token.
+        target_pos = num_computed_tokens + 1 + block
+
+    i.e. the token id gathered against position `i`'s logits is the token at
+    prompt index `i + 1` -- the target of NEXT-token prediction, exactly
+    phase 1's and bf16_floor.py's convention. Position 0 has no preceding
+    context to have been predicted from, so there is no target-token id to
+    pair it with, and `compute_prompt_logprobs`'s query range naturally
+    starts from `num_computed_tokens` (0 for a fresh, non-chunked request)
+    with the `+1` shift already baked into which token id each row is
+    compared against -- the first row of the returned logprobs corresponds
+    to predicting token 1 from position 0's hidden state, not to a logprob
+    "at" position 0 itself. This is the same INFORMATION-LEVEL reason V1
+    drops position 0 (there is nothing to compare it against), reached via a
+    different code path -- a triton kernel's index arithmetic rather than
+    `_get_prompt_logprobs_dict`'s Python slicing -- so the conclusion
+    (this hook's captured tensor has `len(token_ids) - 1` rows, matching
+    bf16_floor.py's `output.prompt_logprobs[1:]`) still holds, but was
+    re-derived against the actually-active file rather than assumed to carry
+    over from the V1 citation.
+
 --------------------------------------------------------------------------
 DESIGN
 --------------------------------------------------------------------------
-1. `_install_logits_hook(worker)` -- a collective_rpc callable. Wraps
-   `worker.model_runner.model.compute_logits` with a closure that calls the
-   original, and if the result is not None (i.e. this is rank 0, or TP=1),
-   clones it to CPU float32 and appends it to a list stashed on the worker
-   (`worker._collective_logits_captures`). Returns the original output
-   unchanged, so normal engine behavior (sampling, the existing
-   prompt_logprobs machinery) is untouched -- this hook only *observes*.
+1. `LogitsHookWorkerExtension` -- a plain class, defined at module level so
+   it has a stable dotted import path (Q2's `worker_extension_cls`
+   requirement). Injected as a base class of `Worker` at `LLM()` construction
+   time; its methods run with `self` bound to the actual worker instance, so
+   they read exactly like the original design's `worker`-parameter callables
+   did, just via inheritance instead of `functools.partial`.
 
-2. Drive a real `LLM.generate()` call exactly as bf16_floor.py does, EXCEPT
-   `prompt_logprobs=1` instead of `prompt_logprobs=-1`. Per
-   gpu_model_runner.py:5747-5802 and vllm/v1/sample/sampler.py:310-339
-   (`Sampler.gather_logprobs`, `torch.topk(logprobs, num_logprobs, dim=-1)`),
-   the code path that computes logits at every prompt position is gated by
+2. `install_logits_hook(self)` -- asserts the V2 runner is active (Q1),
+   then wraps `self.model_runner.model.compute_logits` with a closure that
+   calls the original, and if the result is not None (i.e. this is rank 0,
+   or TP=1), clones it to CPU float32 (Q4, Q5) and appends it to a list
+   stashed on `self` (`self._collective_logits_captures`). Returns the
+   original output unchanged, so normal engine behavior (sampling, the
+   existing prompt_logprobs machinery) is untouched -- this hook only
+   *observes*.
+
+3. Drive a real `LLM.generate()` call exactly as bf16_floor.py does, EXCEPT
+   `prompt_logprobs=1` instead of `prompt_logprobs=-1`. The code path that
+   computes logits at every prompt position is gated by
    `sampling_params.prompt_logprobs is not None` -- not by its magnitude.
-   Everything downstream that scales with vocab_size (the `topk` call, the
-   `LogprobsTensors` CPU buffers sized `num_prompt_logprobs + 1` wide, and
-   both Python-object-construction loops described in PROBLEM above) scales
-   with the REQUESTED count instead once the hook has already captured the
-   full untruncated tensor straight off `compute_logits`. `prompt_logprobs=1`
+   Everything downstream that scales with vocab_size (the top-k call inside
+   `Sampler.gather_logprobs`, the `LogprobsTensors` CPU buffers, and both
+   Python-object-construction loops described in PROBLEM above) scales with
+   the REQUESTED count instead once the hook has already captured the full
+   untruncated tensor straight off `compute_logits`. `prompt_logprobs=1`
    keeps that whole downstream machinery (which we no longer need, and don't
    disable) cheap rather than trying to disable it.
 
-3. `_retrieve_and_clear_logits(worker, expected_min_positions)` -- a second
-   collective_rpc callable, called after `generate()` returns. Reads and
-   clears `worker._collective_logits_captures`. A single `generate()` call
-   with `max_tokens=1` calls `compute_logits` twice per request (once for
-   prompt logprobs over every position, once for the single sampled token,
-   per Q1's two call sites), so with chunked prefill and prefix caching both
-   disabled (design point 3a below) exactly one captured tensor should have
-   `shape[0] > 1` (the prompt-logprobs one) and exactly one should have
-   `shape[0] == 1` (the sampled token). **This is asserted, not heuristically
-   selected**: if more than one captured tensor has `shape[0] > 1`, retrieval
-   raises with every such shape listed, rather than silently picking the
-   largest. A silent "pick the biggest one" would have quietly returned a
-   partial chunk instead of the full prompt tensor exactly when chunked
-   prefill fires -- the same failure mode this design otherwise disables at
-   the source (3a) is not allowed to also hide behind a heuristic here.
+3a. `retrieve_and_clear_logits(self, expected_min_positions)` -- a second
+   collective_rpc call, called after `generate()` returns. Reads and clears
+   `self._collective_logits_captures`. A single `generate()` call with
+   `max_tokens=1` calls `compute_logits` twice per request under V2's real
+   call graph (Q1: once via `sample()` for the sampled token, once via
+   `compute_prompt_logprobs`'s `logits_fn` for the prompt), so with chunked
+   prefill and prefix caching both disabled (design point 3b below) exactly
+   one captured tensor should have `shape[0] > 1` (the prompt-logprobs one)
+   and exactly one should have `shape[0] == 1` (the sampled token). **This
+   is asserted, not heuristically selected**: if more than one captured
+   tensor has `shape[0] > 1`, retrieval raises with every such shape listed,
+   rather than silently picking the largest.
 
-3a. **Chunked prefill and prefix caching are explicitly disabled** in the
+   THIS ASSERTION IS ALSO WHAT CATCHES A SECOND, DISTINCT CHUNKING HAZARD,
+   independent of `enable_chunked_prefill`: `compute_prompt_logprobs`'s
+   actual logits computation happens inside `compute_prompt_logprobs_with_chunking`
+   (prompt_logprob.py), which has its OWN internal chunk loop --
+
+       CHUNK_SIZE = 1024
+       for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
+           ...
+           prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
+
+   -- sized in PROMPT-LOGPROB POSITIONS, not scheduler token-budget units,
+   and NOT read from or controlled by `scheduler_config.enable_chunked_prefill`
+   at all; it is a fixed memory-management chunk size for materializing
+   full-vocab logits, unconditional on the scheduler flag. For any prompt
+   whose prompt-logprobs computation exceeds 1024 positions, `logits_fn`
+   (i.e. `compute_logits`, i.e. this hook) fires more than once for the
+   prompt tensor, and `retrieve_and_clear_logits` would see more than one
+   `shape[0] > 1` capture and raise, exactly as it does for the
+   scheduler-level chunking case -- the same assertion covers both hazards
+   without needing to know which one caused it. At this repo's current sweep
+   parameters (`seq_len` up to 64), 1024 is never approached, so this has
+   not been observed to trigger; it would first become relevant if `seq_len`
+   grows past roughly 1025.
+
+3b. **Chunked prefill and prefix caching are explicitly disabled** in the
    `LLM(...)` constructor in `_run_worker` (`enable_chunked_prefill=False,
    enable_prefix_caching=False`), not left at their defaults. Both default to
    `True` for a standard generate model (`ModelConfig.is_chunked_prefill_supported`
@@ -280,13 +480,12 @@ DESIGN
    Both are silent failure modes for this specific extraction method, and
    both get worse exactly as the sweep grows (longer seq_len, more
    repetitions -- the two things phase 2a's roadmap wants more of):
-     - Chunked prefill splits one long prefill across multiple forward
-       passes, so `compute_logits` fires once per chunk instead of once for
-       the whole prompt (gpu_model_runner.py:5778-5786's `num_logits =
-       min(num_tokens, num_remaining_tokens)` is exactly the per-chunk
-       slice). Retrieval would then see several `shape[0] > 1` captures, none
-       of which is the full tensor -- design point 3's assertion is what
-       catches this instead of silently returning a chunk.
+     - Chunked prefill (the SCHEDULER-level mechanism, distinct from design
+       point 3a's CHUNK_SIZE=1024 hazard) splits one long prefill across
+       multiple forward-pass STEPS, so `compute_logits` fires once per
+       scheduling chunk instead of once for the whole prompt. Retrieval
+       would then see several `shape[0] > 1` captures, none of which is the
+       full tensor -- the same 3a assertion catches this too.
      - Prefix caching means a repeated prompt (or a shared prefix across the
        one-seed-per-repetition prompts `_seeded_token_batches` generates) can
        skip recomputation for the cached portion entirely, serving cached KV
@@ -298,21 +497,53 @@ DESIGN
        basis for `mean_deviation`) breaks silently, with no error and no
        shape mismatch to catch it.
 
-4. `_uninstall_logits_hook(worker)` -- restores the original
-   `compute_logits`, called after every retrieval so the hook does not leak
-   into whatever the box does next (e.g. SPEC.md 2d's weight-transfer work,
-   which also touches these worker processes).
+   THE WARNING THIS TRIGGERS, READ FROM SOURCE, DOES NOT CHANGE THE ABOVE.
+   Setting `enable_chunked_prefill=False` here logs (arg_utils.py:2657-2666):
+   "This model does not officially support disabling chunked prefill.
+   Disabling this manually may cause the engine to crash or produce
+   incorrect outputs." This fires for essentially any "generate" model with
+   `enable_chunked_prefill` manually set False while the model's own default
+   (`is_chunked_prefill_supported`) is True -- it is a blanket
+   deviation-from-default notice, not a model-specific diagnostic. Every
+   source location that actually branches on `enable_chunked_prefill` was
+   checked for a concrete mechanism:
+     - `vllm/v1/core/sched/scheduler.py:956-964` -- the real effect for a
+       plain dense model: a request whose prefill exceeds the step's token
+       budget is deferred (not scheduled this step) rather than split.
+       Scheduling delay, not corruption.
+     - `vllm/model_executor/models/config.py:611-622` -- a hard assert tied
+       to Mamba `cache_config.mamba_cache_mode == "align"`. Qwen3-0.6B has
+       no Mamba layers; does not apply.
+     - `vllm/v1/engine/core.py:265-277` -- the engine itself force-disables
+       chunked prefill AND prefix caching for models with non-causal
+       attention layers, its own comment stating both "would corrupt
+       non-causal prefill." Qwen3 is fully causal; this is evidence FOR
+       causal models being safe (it is the non-causal case being protected
+       against), not against.
+     - `vllm/v1/attention/backends/turboquant_attn.py:278-283` -- workspace
+       memory sizing for the TurboQuant quantized-attention backend, not the
+       plain bf16/eager path this repo uses.
+   No source-confirmed corruption mechanism was found for a causal,
+   non-Mamba, non-quantized-attention bf16 dense model. Separately: on the
+   A100 box, `EngineArgs`' `LLM_CLASS`-context default `max_num_batched_tokens`
+   is 8192 (arg_utils.py:2602-2611, A100 explicitly routed to the
+   non-H100/H200 branch). Every prompt this repo submits (`seq_len` up to
+   64, one request at a time) is trivially under that budget, meaning
+   scheduler-level chunking would never fire even with the flag left on.
+   **Disabling it is a provable no-op at current parameters, not a live
+   correctness risk being traded for a live scheduling hazard.** THIS STOPS
+   HOLDING if a later sweep pushes `seq_len` toward the thousands -- at that
+   point re-examine whether the token budget is still comfortably clear
+   before continuing to disable the flag.
 
-5. `run_one_prompt(llm, token_ids) -> torch.Tensor` -- ties 1-4 together for
+4. `uninstall_logits_hook(self)` -- restores the original `compute_logits`,
+   called after every retrieval so the hook does not leak into whatever the
+   box does next (e.g. SPEC.md 2d's weight-transfer work, which also touches
+   these worker processes).
+
+5. `run_one_prompt(llm, token_ids) -> torch.Tensor` -- ties 2-4 together for
    one prompt: install, generate, retrieve, uninstall. Returns a
-   `[seq_len - 1, vocab]` float32 CPU tensor -- position 0 dropped, same
-   convention as bf16_floor.py's `_run_worker` (there is no preceding context
-   to condition position 0's logits on, so it is not comparable and both
-   paths drop it). This drop happens automatically here, not as an explicit
-   slice: gpu_model_runner.py:5776-5786 computes `num_logits =
-   num_prompt_tokens - (start_idx + 1)` for a non-chunked request, i.e.
-   exactly `seq_len - 1` positions, the same set bf16_floor.py's
-   `output.prompt_logprobs[1:]` selects.
+   `[seq_len - 1, vocab]` float32 CPU tensor -- position 0 dropped, per Q6.
 
 6. `_run_worker` / `measure_differential_floor` -- structurally identical to
    bf16_floor.py's functions of the same name (same one-prompt-at-a-time
@@ -321,10 +552,11 @@ DESIGN
    parent process), with `run_one_prompt` substituted for the
    prompt_logprobs-and-Python-loop extraction. The LLM constructor args are
    the same EXCEPT `enable_chunked_prefill=False, enable_prefix_caching=False`
-   (design point 3a) -- bf16_floor.py's own `LLM(...)` call leaves both at
-   their (on) defaults, so this is a deliberate divergence, not an oversight;
-   see the SMOKE TEST section below for how to hold the computation identical
-   across both modules despite it.
+   (design point 3b) and `worker_extension_cls=...` (Q2, new in this
+   revision) -- bf16_floor.py's own `LLM(...)` call leaves the first two at
+   their (on) defaults and has no need of the third; see the SMOKE TEST
+   section below for how to hold the computation identical across both
+   modules despite it.
 
 --------------------------------------------------------------------------
 WHAT THIS DOES NOT ADDRESS -- flagged, not solved
@@ -333,36 +565,34 @@ WHAT THIS DOES NOT ADDRESS -- flagged, not solved
   already passes `enforce_eager=True`, which should mean `compute_logits` is
   called as a plain Python method (not captured inside a compiled graph or a
   CUDA-graph replay region) -- but this was not verified by tracing the
-  compile/capture boundary in gpu_model_runner.py, and cudagraph interaction
-  is exactly the kind of thing that silently breaks a monkeypatch. If this
+  compile/capture boundary in the V2 runner, and cudagraph interaction is
+  exactly the kind of thing that silently breaks a monkeypatch. If this
   module is adapted to run without `enforce_eager=True`, re-verify that
   `compute_logits` is still a live Python call at the point the hook patches
   it.
-- The V1/V2 model runner branch is model- and config-dependent (Q1). The
-  `RuntimeError` in `_install_logits_hook` below turns a wrong assumption
-  into a loud failure rather than a silent wrong measurement, but a V2
-  implementation of this hook was not written -- V2's prompt-logprobs path
-  lives in vllm/v1/worker/gpu/sample/prompt_logprob.py and calls
-  `compute_logits` (there called `logits_fn`) through a different chunking
-  loop (`compute_prompt_logprobs_with_chunking`, CHUNK_SIZE=1024); the same
-  hook on `model.compute_logits` should still work there since the call site
-  is the same underlying model method, but this was not traced as carefully
-  as the V1 path and is unverified.
 - Monkeypatching an instance attribute (`model.compute_logits = hooked`)
   shadows the class method via normal Python instance-`__dict__` lookup, a
   standard technique -- but was not verified against whatever `nn.Module`
   machinery (hooks, `__setattr__` overrides) vLLM's model base classes might
   define that could interfere with a plain attribute assignment.
 - No timing comparison exists yet between this path and bf16_floor.py's,
-  since neither has been run. That comparison is the actual point of writing
-  this as a second, side-by-side module rather than editing the original.
-- Disabling chunked prefill and prefix caching (design point 3a) changes the
+  since neither has been run to completion. That comparison is the actual
+  point of writing this as a second, side-by-side module rather than editing
+  the original.
+- Disabling chunked prefill and prefix caching (design point 3b) changes the
   configuration bf16_floor.py's own measurement was taken under (which runs
   with both left at their defaults, i.e. on). The two paths are therefore
   not a pure extraction-method A/B test as configured -- see the smoke test
   below for what IS held constant across them, and
   `tolerance/phase2a_bf16_floor.json` for the resulting prefix-caching
   caveat on the committed floor.
+- Whether `worker_extension_cls`'s dynamic `__bases__` mutation
+  (worker_base.py:283-285) interacts correctly with repeated `LLM()`
+  construction within one long-lived worker PROCESS (e.g. across the two
+  `_spawn_worker` subprocess invocations this module makes for TP=1 then
+  TP=2 -- each is its own fresh process, so this should not matter here, but
+  was not traced for the general case of constructing more than one `LLM`
+  per process).
 
 --------------------------------------------------------------------------
 SMOKE TEST -- run before trusting any number out of this module
@@ -383,6 +613,7 @@ change, and no additional forward pass between them; both read out the same
         model=checkpoint_dir, tensor_parallel_size=1, dtype="bfloat16",
         enforce_eager=True, max_logprobs=-1, logprobs_mode="raw_logits",
         enable_chunked_prefill=False, enable_prefix_caching=False,
+        worker_extension_cls=collective_logits.WORKER_EXTENSION_QUALNAME,
     )
     tokens = [1, 2, 3, 4, 5, 6, 7, 8]  # any short prompt
 
@@ -407,7 +638,9 @@ kwargs must match on every argument that affects computation
 (`enable_chunked_prefill`/`enable_prefix_caching` included, since
 bf16_floor.py does not set them but this smoke test must, to hold the
 computation identical while isolating the extraction method as the only
-variable). `torch.equal`, not `torch.allclose`: if this ever needs relaxing
+variable; `worker_extension_cls` does not affect computation, only which
+worker methods exist, so it is safe to add even though bf16_floor.py has no
+equivalent). `torch.equal`, not `torch.allclose`: if this ever needs relaxing
 to tolerate real floating-point noise, that in itself is a finding (it would
 mean the two paths are not actually reading the same computed value), not a
 reason to loosen the assertion first.
@@ -430,136 +663,152 @@ if TYPE_CHECKING:
     import torch
 
 # --------------------------------------------------------------------------- #
-# Worker-side collective_rpc callables. Each is sent via cloudpickle to every
-# worker process (Q2) and called with the Worker instance as its first
-# argument. Everything that touches torch/vllm internals is imported lazily
-# inside the function bodies, matching bf16_floor.py's convention, so that
+# Worker extension (Q2). Injected as a base class of Worker by vLLM itself
+# (worker_base.py:265-291) when `worker_extension_cls` names this class's
+# dotted path. Methods run with `self` bound to the actual Worker instance.
+# Everything that touches torch/vllm internals is imported lazily inside
+# method bodies, matching bf16_floor.py's convention, so that
 # `import weight_sync_bench.phase2.collective_logits` for its constants does
 # not require the phase2 extra to be installed.
 # --------------------------------------------------------------------------- #
 
-_EXPECTED_RUNNER_CLASS = "GPUModelRunnerV1"
+WORKER_EXTENSION_QUALNAME = (
+    "weight_sync_bench.phase2.collective_logits.LogitsHookWorkerExtension"
+)
+
+_EXPECTED_RUNNER_MODULE = "vllm.v1.worker.gpu.model_runner"
 
 
-def _install_logits_hook(worker: Any) -> None:
-    """collective_rpc callable. See Q1/Q3/design point 1 in the module
-    docstring for what this wraps and why. Idempotent per worker process:
-    re-installing after `_uninstall_logits_hook` is safe; installing twice
-    without uninstalling raises rather than silently double-wrapping.
+class LogitsHookWorkerExtension:
+    """Mixed into `Worker` via `worker_extension_cls` (Q2). Do not
+    instantiate directly -- vLLM adds this as a base class of the real
+    Worker class in each worker process; `self` in every method below is
+    the Worker instance, with normal access to `self.model_runner` etc.
     """
-    runner = worker.model_runner
-    runner_class = type(runner).__name__
-    if runner_class != _EXPECTED_RUNNER_CLASS:
-        raise RuntimeError(
-            f"expected {_EXPECTED_RUNNER_CLASS} (verified for Qwen3ForCausalLM "
-            f"at vLLM v0.28.0 default settings -- see the module docstring's "
-            f"Q1 answer), got {runner_class!r}. VLLM_USE_V2_MODEL_RUNNER may "
-            "be set, or a different model/version combination is in use that "
-            "this hook was not verified against."
-        )
 
-    model = runner.model
-    if getattr(model, "_collective_logits_hook_installed", False):
-        raise RuntimeError(
-            "hook already installed on this worker; call "
-            "_uninstall_logits_hook before installing again"
-        )
-
-    original_compute_logits = model.compute_logits
-
-    def hooked_compute_logits(hidden_states, *args, **kwargs):
-        import torch
-
-        out = original_compute_logits(hidden_states, *args, **kwargs)
-        # Non-None only on the rank `tensor_model_parallel_gather` gathered
-        # to (Q3) -- rank 0 on CUDA. Cast to float32 to match
-        # gpu_model_runner.py:5812-5813's own `logits_mode="raw_logits"`
-        # handling, so this path measures the same quantity bf16_floor.py's
-        # prompt_logprobs path does.
-        if out is not None:
-            worker._collective_logits_captures.append(
-                out.detach().to(dtype=torch.float32, device="cpu")
+    def install_logits_hook(self) -> None:
+        """See Q1 (runner check)/Q3 (why only rank 0 captures anything)/
+        design point 2 for what this wraps and why. Idempotent per worker
+        process: re-installing after `uninstall_logits_hook` is safe;
+        installing twice without uninstalling raises rather than silently
+        double-wrapping.
+        """
+        runner = self.model_runner
+        runner_module = type(runner).__module__
+        if runner_module != _EXPECTED_RUNNER_MODULE:
+            raise RuntimeError(
+                f"expected the V2 model runner (module "
+                f"{_EXPECTED_RUNNER_MODULE!r}, verified as the default for "
+                f"Qwen3ForCausalLM at vLLM v0.28.0 -- see the module "
+                f"docstring's Q1 answer), got module {runner_module!r}. "
+                "VLLM_USE_V2_MODEL_RUNNER may be set to 0, or a different "
+                "model/version combination is in use that this hook was "
+                "not verified against."
             )
-        return out
 
-    worker._collective_logits_captures = []
-    worker._collective_logits_original_compute_logits = original_compute_logits
-    model.compute_logits = hooked_compute_logits
-    model._collective_logits_hook_installed = True
+        model = runner.model
+        if getattr(model, "_collective_logits_hook_installed", False):
+            raise RuntimeError(
+                "hook already installed on this worker; call "
+                "uninstall_logits_hook before installing again"
+            )
 
+        original_compute_logits = model.compute_logits
 
-def _retrieve_and_clear_logits(
-    worker: Any, expected_min_positions: int
-) -> "torch.Tensor | None":
-    """collective_rpc callable. Returns the CPU float32 [positions, vocab]
-    tensor captured since the last call (or since install), and clears the
-    buffer. Returns None on every rank whose `compute_logits` never produced
-    a non-None result (Q3) -- i.e. every rank except the one
-    tensor_model_parallel_gather gathered to.
+        def hooked_compute_logits(hidden_states, *args, **kwargs):
+            import torch
 
-    With chunked prefill and prefix caching disabled (see `_run_worker`'s
-    `LLM(...)` call and the module docstring's design point 3a), a single
-    `generate()` call with `max_tokens=1` should produce exactly one capture
-    with `shape[0] > 1` (the prompt-logprobs tensor, one call site) and
-    exactly one with `shape[0] == 1` (the sampled token, the other call
-    site) -- see Q1. This is ASSERTED, not heuristically selected: if
-    chunking or caching is silently active despite the constructor flags (or
-    if the compute_logits call graph doesn't match what was traced), more
-    than one multi-position capture will show up here, and that is exactly
-    the failure this function exists to surface loudly instead of
-    quietly returning a partial chunk.
-    """
-    captures = getattr(worker, "_collective_logits_captures", [])
-    worker._collective_logits_captures = []
-    if not captures:
-        return None
+            out = original_compute_logits(hidden_states, *args, **kwargs)
+            # Non-None only on the rank `tensor_model_parallel_gather` gathered
+            # to (Q3) -- rank 0 on CUDA. Cast to float32 post-hoc (Q5), on an
+            # already-bf16-computed tensor, matching what the engine's own
+            # prompt_logprobs path does under logprobs_mode="raw_logits" so
+            # this hook measures the same quantity bf16_floor.py's does.
+            if out is not None:
+                self._collective_logits_captures.append(
+                    out.detach().to(dtype=torch.float32, device="cpu")
+                )
+            return out
 
-    candidates = [t for t in captures if t.shape[0] > 1]
-    if len(candidates) > 1:
-        shapes = [tuple(t.shape) for t in candidates]
-        raise RuntimeError(
-            f"expected at most one compute_logits capture with more than one "
-            f"position (chunked prefill and prefix caching should both be "
-            f"disabled -- see design point 3a), got {len(candidates)}: "
-            f"shapes {shapes}. Either the constructor flags did not take "
-            "effect, or an unexpected extra compute_logits call happened."
-        )
-    if not candidates:
-        # Every capture had exactly 1 position: either the prompt genuinely
-        # has 1 comparable position (expected_min_positions <= 1), or no
-        # prompt-logprobs tensor was captured at all.
-        if expected_min_positions <= 1 and captures:
-            return captures[0]
-        raise RuntimeError(
-            f"expected a compute_logits capture with >= {expected_min_positions} "
-            f"positions, but every capture had exactly 1 position: "
-            f"{[tuple(t.shape) for t in captures]}"
-        )
+        self._collective_logits_captures = []
+        self._collective_logits_original_compute_logits = original_compute_logits
+        model.compute_logits = hooked_compute_logits
+        model._collective_logits_hook_installed = True
 
-    best = candidates[0]
-    if best.shape[0] < expected_min_positions:
-        raise RuntimeError(
-            f"captured logits have {best.shape[0]} positions, expected at "
-            f"least {expected_min_positions} -- the compute_logits call "
-            "graph for this request may not match what this hook assumed "
-            "(see the module docstring's 'what this does not address')"
-        )
-    return best
+    def retrieve_and_clear_logits(
+        self, expected_min_positions: int
+    ) -> "torch.Tensor | None":
+        """Returns the CPU float32 [positions, vocab] tensor captured since
+        the last call (or since install), and clears the buffer. Returns
+        None on every rank whose `compute_logits` never produced a non-None
+        result (Q3) -- i.e. every rank except the one
+        tensor_model_parallel_gather gathered to.
 
+        With chunked prefill and prefix caching disabled (see `_run_worker`'s
+        `LLM(...)` call and design point 3b), a single `generate()` call
+        with `max_tokens=1` should produce exactly one capture with
+        `shape[0] > 1` (the prompt-logprobs tensor) and exactly one with
+        `shape[0] == 1` (the sampled token) -- see Q1. This is ASSERTED, not
+        heuristically selected, and doubles as the catch for design point
+        3a's independent CHUNK_SIZE=1024 hazard: if either scheduler-level
+        chunking or the fixed-size prompt-logprobs chunk loop fires despite
+        the constructor flags, more than one multi-position capture shows up
+        here, and that is exactly the failure this function exists to
+        surface loudly instead of quietly returning a partial chunk.
+        """
+        captures = getattr(self, "_collective_logits_captures", [])
+        self._collective_logits_captures = []
+        if not captures:
+            return None
 
-def _uninstall_logits_hook(worker: Any) -> None:
-    """collective_rpc callable. Restores the original compute_logits so the
-    hook does not linger for whatever the box does with this worker next.
-    """
-    runner = worker.model_runner
-    model = runner.model
-    original = getattr(worker, "_collective_logits_original_compute_logits", None)
-    if original is None:
-        return
-    model.compute_logits = original
-    model._collective_logits_hook_installed = False
-    worker._collective_logits_original_compute_logits = None
-    worker._collective_logits_captures = []
+        candidates = [t for t in captures if t.shape[0] > 1]
+        if len(candidates) > 1:
+            shapes = [tuple(t.shape) for t in candidates]
+            raise RuntimeError(
+                f"expected at most one compute_logits capture with more than "
+                f"one position (chunked prefill and prefix caching should "
+                f"both be disabled, and prompt length should be under "
+                f"compute_prompt_logprobs_with_chunking's CHUNK_SIZE=1024 -- "
+                f"see design points 3a/3b), got {len(candidates)}: shapes "
+                f"{shapes}. Either the constructor flags did not take "
+                "effect, the prompt exceeded 1024 positions, or an "
+                "unexpected extra compute_logits call happened."
+            )
+        if not candidates:
+            # Every capture had exactly 1 position: either the prompt genuinely
+            # has 1 comparable position (expected_min_positions <= 1), or no
+            # prompt-logprobs tensor was captured at all.
+            if expected_min_positions <= 1 and captures:
+                return captures[0]
+            raise RuntimeError(
+                f"expected a compute_logits capture with >= {expected_min_positions} "
+                f"positions, but every capture had exactly 1 position: "
+                f"{[tuple(t.shape) for t in captures]}"
+            )
+
+        best = candidates[0]
+        if best.shape[0] < expected_min_positions:
+            raise RuntimeError(
+                f"captured logits have {best.shape[0]} positions, expected at "
+                f"least {expected_min_positions} -- the compute_logits call "
+                "graph for this request may not match what this hook assumed "
+                "(see the module docstring's 'what this does not address')"
+            )
+        return best
+
+    def uninstall_logits_hook(self) -> None:
+        """Restores the original compute_logits so the hook does not leak
+        into whatever the box does with this worker next.
+        """
+        runner = self.model_runner
+        model = runner.model
+        original = getattr(self, "_collective_logits_original_compute_logits", None)
+        if original is None:
+            return
+        model.compute_logits = original
+        model._collective_logits_hook_installed = False
+        self._collective_logits_original_compute_logits = None
+        self._collective_logits_captures = []
 
 
 # --------------------------------------------------------------------------- #
@@ -572,19 +821,19 @@ def _uninstall_logits_hook(worker: Any) -> None:
 def run_one_prompt(llm: Any, token_ids: list[int]) -> "torch.Tensor":
     """Runs one teacher-forced prompt through `llm` and returns a
     [len(token_ids) - 1, vocab] float32 CPU tensor of raw logits -- position
-    0 dropped, matching bf16_floor.py's `output.prompt_logprobs[1:]`
-    convention (see design point 5 for why this drop happens automatically).
+    0 dropped, per Q6. Requires `llm` to have been constructed with
+    `worker_extension_cls=WORKER_EXTENSION_QUALNAME`.
     """
     from vllm import SamplingParams
 
-    llm.collective_rpc(_install_logits_hook)
+    llm.collective_rpc("install_logits_hook")
     try:
         sp = SamplingParams(max_tokens=1, temperature=0.0, prompt_logprobs=1)
         llm.generate([{"prompt_token_ids": token_ids}], sp, use_tqdm=False)
 
         expected_min_positions = len(token_ids) - 1
         results = llm.collective_rpc(
-            _retrieve_and_clear_logits, args=(expected_min_positions,)
+            "retrieve_and_clear_logits", args=(expected_min_positions,)
         )
         non_none = [r for r in results if r is not None]
         if len(non_none) != 1:
@@ -597,7 +846,7 @@ def run_one_prompt(llm: Any, token_ids: list[int]) -> "torch.Tensor":
             )
         return non_none[0]
     finally:
-        llm.collective_rpc(_uninstall_logits_hook)
+        llm.collective_rpc("uninstall_logits_hook")
 
 
 def _run_worker(
@@ -612,8 +861,9 @@ def _run_worker(
     function of the same name (two LLM() instances in one process is flaky).
     Loads `model_dir` at TP degree `tp`, computes full-vocab raw-logit
     prompt tensors for `repetitions` seeded token batches via the
-    collective_rpc hook instead of prompt_logprobs=-1, and torch.saves them
-    (a list of [batch, seq_len - 1, vocab] float32 tensors) to `out_path`.
+    collective_rpc worker extension instead of prompt_logprobs=-1, and
+    torch.saves them (a list of [batch, seq_len - 1, vocab] float32 tensors)
+    to `out_path`.
     """
     import torch
     from vllm import LLM
@@ -627,18 +877,25 @@ def _run_worker(
         enforce_eager=True,  # see module docstring's compute_logits/compile caveat
         gpu_memory_utilization=0.85,
         # Both default to True for a standard generate model (see design
-        # point 3a) and both are silent failure modes for this extraction
-        # method: chunked prefill makes compute_logits fire once per chunk
-        # instead of once for the whole prompt (retrieval would see several
-        # multi-position captures instead of one -- see
-        # _retrieve_and_clear_logits's assertion), and prefix caching can
-        # skip recomputation for a repeated prompt/prefix entirely, which
-        # would make the repetitions this floor is averaged over
-        # non-independent. Neither failure raises or changes a tensor shape
-        # on its own, so both are disabled explicitly rather than left at
-        # their defaults.
+        # point 3b) and both are silent failure modes for this extraction
+        # method: chunked prefill makes compute_logits fire once per
+        # scheduling chunk instead of once for the whole prompt (retrieval
+        # would see several multi-position captures instead of one --
+        # LogitsHookWorkerExtension.retrieve_and_clear_logits's assertion),
+        # and prefix caching can skip recomputation for a repeated
+        # prompt/prefix entirely, which would make the repetitions this
+        # floor is averaged over non-independent. Neither failure raises or
+        # changes a tensor shape on its own, so both are disabled explicitly
+        # rather than left at their defaults. See design point 3b for why
+        # the resulting "does not officially support disabling chunked
+        # prefill" warning does not indicate a correctness risk here, and
+        # why it is a no-op at this module's current seq_len.
         enable_chunked_prefill=False,
         enable_prefix_caching=False,
+        # Q2: the supported way to add worker-side methods reachable by
+        # collective_rpc's string dispatch path, without needing
+        # VLLM_ALLOW_INSECURE_SERIALIZATION.
+        worker_extension_cls=WORKER_EXTENSION_QUALNAME,
     )
 
     token_batches = _seeded_token_batches(repetitions, batch, seq_len, QWEN3_0_6B.vocab)
