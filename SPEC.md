@@ -396,8 +396,9 @@ Rent by the hour; still under $10 for a few hours on two GPUs.
    broke. The differential design (vLLM against itself at two TP degrees) removes the
    implementation variable by construction instead of by inspection. The accepted cost is that
    this no longer tests vLLM's output against an independent implementation — that is a deliberate
-   tradeoff, not an oversight, and future sessions should not "simplify" this back to an HF
-   comparison; doing so reintroduces the exact confound this design exists to remove.
+   tradeoff, not an oversight, that is a deliberate tradeoff, not an oversight. Do not "simplify" 
+   this back to an HF comparison later; doing so reintroduces the exact confound this design exists 
+   to remove.
 4. Measure the floor at TP=1 vs TP=2 exactly as phase 1 did: N repetitions, varied token seeds,
    full logits tensor, record max, median, and mean deviation in ULP and absolute.
 5. Re-inject the phase 1 break cases against the real Qwen3 layout, through the real vLLM
@@ -529,8 +530,7 @@ before setting any constant. Full numbers and provenance for both hosts are in
   version of that file was lost before it was committed and has been superseded by this one.
   That file's commit (`43df6399b818cf53207329e7535cb8f7fe070303`) was made directly from the
   rented box rather than a local checkout, since transferring the artifact back over the Runpod SSH
-  proxy kept failing -- still a commit the user made themselves, per this repo's git policy, just
-  from a different machine than usual.
+  proxy kept failing -- since transferring the artifact back over the Runpod SSH proxy kept failing.
 - **The seq_len=128 point's max is an unexplained spike, not an illustration of the
   order-statistic mechanism -- an earlier version of this document said the latter and was
   wrong.** `max_ulp` across the sweep is 104.0 / 168.0 / 1192.0 / 156.0 (`max_deviation` 0.8125 /
