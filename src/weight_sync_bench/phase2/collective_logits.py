@@ -312,10 +312,18 @@ Q4. How do return values cross the boundary? Must tensors move to CPU first?
     own docstring says: "It is recommended to use this API to only pass
     control messages, and set up data-plane communication to pass data."
     After crossing Hop B, the value also crosses Hop A (EngineCore -> `LLM`
-    process) via `MsgpackEncoder`, which per Q2 has native, secure support
-    for CPU tensors -- no additional handling needed there. Both hops point
-    the same way: `.detach().cpu()` before returning from the worker
-    extension method, done in `install_logits_hook`'s wrapper below.
+    process) via `MsgpackEncoder`. CORRECTED IN THIS REVISION: an earlier
+    version of this docstring claimed Hop A had "native, secure support for
+    CPU tensors -- no additional handling needed there." That is true of
+    `MsgpackEncoder.enc_hook` IN ISOLATION (`_encode_tensor` always fires for
+    any `torch.Tensor`, insecure flag or not), but false of what actually
+    happens to a `collective_rpc` return value once it is wrapped in
+    `UtilityResult` for the trip back -- see Q7, found by running on the box
+    after this claim turned out wrong. Both hops still point the same way on
+    the ENCODE side regardless -- `.detach().cpu()` before returning from
+    the worker extension method, done in `install_logits_hook`'s wrapper
+    below -- but getting the tensor back out on the DECODE side needed the
+    fix Q7 and design point 2a describe.
 
 Q5. Does the CPU float32 cast in the hook happen after the bf16 computation,
     or does it change what dtype the computation itself runs in?
@@ -362,40 +370,162 @@ Q5. Does the CPU float32 cast in the hook happen after the bf16 computation,
         `.float()` in this file does not mistake it for evidence against the
         above.
 
-Q6. Why is position 0 dropped, under the V2 runner that is actually active?
+Q6. Why does the raw capture have `len(token_ids)` rows, and which one has
+    to be dropped to match bf16_floor.py's `len(token_ids) - 1`?
 
-    The original version of this module derived the position-0-drop
-    convention against `gpu_model_runner.py:5776-5786` (V1) and then, when
-    the runner assumption turned out wrong, that citation became a citation
-    of a file not in use. Re-derived here against the file actually active:
-    `vllm/v1/worker/gpu/sample/prompt_logprob.py`, `PromptLogprobsWorker.
-    compute_prompt_logprobs` and its helper `get_prompt_logprobs_token_ids`.
+    CORRECTED IN THIS REVISION. The previous version of this docstring
+    concluded the hook's captured tensor already had `len(token_ids) - 1`
+    rows, with position 0 dropped, by analogy with V1's structure (where the
+    hidden-state slice passed to `compute_logits` was already trimmed before
+    the call). Running on the box showed the actual captured shape for an
+    8-token prompt is `[8, vocab]`, not `[7, vocab]` -- the conclusion about
+    WHICH ROWS ARE SEMANTICALLY MEANINGFUL was right, but the reasoning about
+    where the trim happens, and therefore whether the hook needs to do it
+    itself, was wrong. This is a second instance of the failure named at the
+    top of this docstring: reasoning by analogy from V1's structure instead
+    of tracing V2's actual call sequence through to where the shape is
+    decided. It was caught the same way the first instance was -- by running
+    on the box, not by rereading harder -- and the fix is the same: read the
+    full function, in order, to where it actually produces the value in
+    question.
 
-    `compute_prompt_logprobs` builds `prompt_logprobs_token_ids` via a triton
-    kernel, `_prompt_logprobs_token_ids_kernel` (prompt_logprob.py), whose
-    body computes, per scheduled query position:
+    The real mechanism, in `vllm/v1/worker/gpu/sample/prompt_logprob.py`,
+    `PromptLogprobsWorker.compute_prompt_logprobs`:
 
-        # NOTE(woosuk): We should shift the pos by one
-        # because the logprob is computed for the next token.
-        target_pos = num_computed_tokens + 1 + block
+        prompt_token_ids, prompt_logprobs, prompt_ranks = compute_prompt_logprobs_with_chunking(
+            prompt_logprobs_token_ids,
+            hidden_states[: input_batch.num_tokens],   # ALL scheduled positions, untrimmed
+            logits_fn,                                  # our hook fires HERE, on all of them
+            max_num_prompt_logprobs,
+            self.logprobs_mode,
+        )
+        ...
+        for i, req_id in enumerate(input_batch.req_ids):
+            start_idx = query_start_loc_np[i]
+            end_idx = query_start_loc_np[i + 1]
+            if not req_is_prompt_chunked:
+                end_idx -= 1                             # trim happens HERE, AFTER logits_fn returned
+            logprobs = LogprobsTensors(
+                logprob_token_ids=prompt_token_ids[start_idx:end_idx, :width], ...
+            )
 
-    i.e. the token id gathered against position `i`'s logits is the token at
-    prompt index `i + 1` -- the target of NEXT-token prediction, exactly
-    phase 1's and bf16_floor.py's convention. Position 0 has no preceding
-    context to have been predicted from, so there is no target-token id to
-    pair it with, and `compute_prompt_logprobs`'s query range naturally
-    starts from `num_computed_tokens` (0 for a fresh, non-chunked request)
-    with the `+1` shift already baked into which token id each row is
-    compared against -- the first row of the returned logprobs corresponds
-    to predicting token 1 from position 0's hidden state, not to a logprob
-    "at" position 0 itself. This is the same INFORMATION-LEVEL reason V1
-    drops position 0 (there is nothing to compare it against), reached via a
-    different code path -- a triton kernel's index arithmetic rather than
-    `_get_prompt_logprobs_dict`'s Python slicing -- so the conclusion
-    (this hook's captured tensor has `len(token_ids) - 1` rows, matching
-    bf16_floor.py's `output.prompt_logprobs[1:]`) still holds, but was
-    re-derived against the actually-active file rather than assumed to carry
-    over from the V1 citation.
+    `logits_fn` (this hook's wrapped `compute_logits`) is called on
+    `hidden_states[: input_batch.num_tokens]` -- every scheduled position,
+    0 through `len(token_ids) - 1`, with no exclusion. The trim to
+    `len(token_ids) - 1` rows happens AFTERWARD, in Python, on the arrays
+    `compute_prompt_logprobs_with_chunking` returned -- code the hook never
+    sees, since it only intercepts `compute_logits`'s return value, not what
+    the caller does with it next.
+
+    The trimmed row is the LAST one, not the first. For an unchunked,
+    complete request, the row at index `len(token_ids) - 1` (hidden state at
+    the last prompt position) would need a target token at
+    `num_computed_tokens + 1 + (len(token_ids) - 1)` -- one position past the
+    end of the prompt, i.e. whatever the model goes on to sample, not a
+    prompt token (`_prompt_logprobs_token_ids_kernel`'s own comment: "the
+    logprob is computed for the next token"). That row is dropped
+    (`end_idx -= 1`) because it has no valid prompt-token target, not
+    because of any "no preceding context" reasoning about position 0 --
+    position 0's row IS kept; it predicts the token at position 1.
+    Semantically this lands on the same 7 rows bf16_floor.py's
+    `output.prompt_logprobs[1:]` selects (predict-from-positions 0 through
+    `len(token_ids) - 2`) -- the earlier conclusion about which rows matter
+    was correct -- but getting there now requires an explicit `[:-1]` slice
+    on the hook's raw capture (design point 3a / code below), not an
+    assumption that the capture already arrives pre-trimmed.
+
+Q7. Why can `collective_rpc` not carry a `torch.Tensor` back as a return
+    value at all, and what does this module do instead?
+
+    Diagnosed on the box: `retrieve_and_clear_logits` was returning a real
+    `torch.Tensor`, but what `llm.collective_rpc(...)` handed back to the
+    caller was `['float32', [8, 151936], 1]` -- `_encode_tensor`'s raw
+    `(dtype, shape, aux_buffer_index)` triple, never reconstructed.
+
+    The reconstruction step, `_decode_tensor` (serial_utils.py:398-419), is
+    only ever invoked by msgspec's `dec_hook(self, t: type, obj: Any)`, and
+    `dec_hook` only fires when msgspec is decoding into a STATICALLY TYPED
+    position -- either the whole decoder was constructed with a known
+    message type (`MsgpackDecoder(t=EngineCoreOutputs)`, used for the normal
+    engine-output path, where `torch.Tensor`-typed fields are declared on
+    real msgspec Structs), or a value is explicitly re-converted via
+    `msgspec.convert(value, KnownType, dec_hook=...)`. `collective_rpc`'s
+    return value gets neither. It travels wrapped in `UtilityResult`
+    (`core_client.py:792`, `_process_utility_output` does
+    `future.set_result(output.result.result)` where `output.result` is a
+    `UtilityResult`). On encode, `enc_hook`'s `UtilityResult` branch
+    (serial_utils.py:207-217):
+
+        if isinstance(obj, UtilityResult):
+            result = obj.result
+            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+                return None, result          # result_type discarded
+            result_type_info = _encode_type_info_recursive(result)
+            return result_type_info, result
+
+    Without the insecure flag, `result_type` is `None` -- the information
+    that would let the decoder know "this payload is `list[torch.Tensor |
+    None]`" is thrown away before it ever crosses the wire. On decode,
+    `_decode_utility_result` (serial_utils.py:365-379) checks that same
+    `result_type`, finds `None`, and skips the only branch
+    (`_decode_type_info_recursive` -> `_convert_result` ->
+    `msgspec.convert(result, result_type, dec_hook=self.dec_hook)`) that
+    would ever call `dec_hook` with `t=torch.Tensor` for this payload. The
+    generic, untyped result comes back exactly as its raw native structure
+    -- a 3-element list, because that is what `(str, list[int], int)`
+    decodes to with no type annotation telling msgspec otherwise.
+
+    The tensor's bytes are not lost -- `self.aux_buffers.append(tensor_data(obj))`
+    happened on encode, and the resulting index (`1`) is sitting right there
+    in the decoded triple. What is missing is purely the reconstruction call
+    (`self.aux_buffers[1]` -> `torch.frombuffer(...).view(dtype).view(shape)`),
+    which only `_decode_tensor` performs, and `_decode_tensor` never runs for
+    an untyped `UtilityResult` without the insecure flag.
+
+    THIS IS ALSO WHY IT HAS NEVER BEEN HIT UPSTREAM: every `collective_rpc`
+    call site actually shipped in vLLM returns a plain msgpack-native type --
+    `get_model_inspection` returns `str`, `is_sleeping`/`add_lora` return
+    `bool`, `list_loras` returns `set[int]`, `save_sharded_state` returns
+    `None`. None of them need `UtilityResult`'s type-directed reconstruction
+    branch, so nobody upstream has needed to turn on the flag that gates it.
+
+    NOT FIXED WITH `VLLM_ALLOW_INSECURE_SERIALIZATION`. It would work (it
+    re-enables exactly the `_convert_result`/`dec_hook` branch above), but
+    `_convert_result` does `importlib.import_module(mod_name);
+    getattr(mod, name)` on a module/attribute name carried in the message
+    and converts arbitrary structure into whatever that names -- a
+    materially different, narrower risk than unpickling a function (Q2), but
+    gated behind the identical global switch, and the instruction not to use
+    it stands.
+
+    FIX: reconstruct the tensor by hand, using only always-native msgpack
+    types -- `bytes` needs no type annotation and no insecure flag (it takes
+    the same `CUSTOM_TYPE_RAW_VIEW` ext-type path small inline tensors
+    already use, and `ext_hook`'s handling of that code
+    (serial_utils.py:477-478, `if code == CUSTOM_TYPE_RAW_VIEW: return data`)
+    has no `VLLM_ALLOW_INSECURE_SERIALIZATION` guard at all). Do the encoding
+    and decoding vLLM's own `_encode_tensor`/`_decode_tensor` would have done,
+    explicitly, at the call site: `retrieve_and_clear_logits` returns
+    `(dtype_str, shape_list, raw_bytes)` -- a tuple of a `str`, a `list[int]`,
+    and `bytes`, all natively msgpack-safe -- and `run_one_prompt`
+    reconstructs with `torch.frombuffer(raw_bytes, dtype=getattr(torch,
+    dtype_str)).view(shape).clone()`. `.clone()` because `frombuffer` returns
+    a tensor backed by the (soon to be garbage-collected) decoded bytes
+    object, same reasoning `_decode_tensor` itself applies to its own
+    non-aux buffers (serial_utils.py:414, "Clone ensures tensor is backed by
+    pytorch-owned memory").
+
+    SIZE, so far unexercised: at this repo's current parameters the payload
+    is small -- ~4.9MB fp32 at `seq_len=8`, ~39MB at `seq_len=64` (one
+    request's tensor at a time, not batched, per bf16_floor.py's one-prompt-
+    at-a-time discipline). Comfortable for a single ZMQ message either way.
+    If a later sweep pushes `seq_len` far enough that a single collective_rpc
+    payload becomes unwieldy, reconsider a temp-file handoff (worker writes,
+    returns a path -- a plain `str`, trivially safe over this same
+    transport) instead of growing the in-memory byte buffer further; this is
+    the same `seq_len`-scaling boundary design point 3b already names for
+    the chunked-prefill no-op finding, and both should be re-examined
+    together if `seq_len` grows substantially.
 
 --------------------------------------------------------------------------
 DESIGN
@@ -414,7 +544,10 @@ DESIGN
    stashed on `self` (`self._collective_logits_captures`). Returns the
    original output unchanged, so normal engine behavior (sampling, the
    existing prompt_logprobs machinery) is untouched -- this hook only
-   *observes*.
+   *observes*. The list stores real `torch.Tensor` objects, not the wire
+   format -- the byte-buffer conversion (Q7) happens only at
+   `retrieve_and_clear_logits`, the point where a value actually has to
+   cross back over `collective_rpc`.
 
 3. Drive a real `LLM.generate()` call exactly as bf16_floor.py does, EXCEPT
    `prompt_logprobs=1` instead of `prompt_logprobs=-1`. The code path that
@@ -428,18 +561,35 @@ DESIGN
    keeps that whole downstream machinery (which we no longer need, and don't
    disable) cheap rather than trying to disable it.
 
-3a. `retrieve_and_clear_logits(self, expected_min_positions)` -- a second
+3a. `retrieve_and_clear_logits(self, expected_num_tokens)` -- a second
    collective_rpc call, called after `generate()` returns. Reads and clears
    `self._collective_logits_captures`. A single `generate()` call with
    `max_tokens=1` calls `compute_logits` twice per request under V2's real
    call graph (Q1: once via `sample()` for the sampled token, once via
-   `compute_prompt_logprobs`'s `logits_fn` for the prompt), so with chunked
-   prefill and prefix caching both disabled (design point 3b below) exactly
-   one captured tensor should have `shape[0] > 1` (the prompt-logprobs one)
-   and exactly one should have `shape[0] == 1` (the sampled token). **This
-   is asserted, not heuristically selected**: if more than one captured
-   tensor has `shape[0] > 1`, retrieval raises with every such shape listed,
-   rather than silently picking the largest.
+   `compute_prompt_logprobs`'s `logits_fn` for the prompt, on ALL
+   `expected_num_tokens` positions untrimmed -- Q6), so with chunked prefill
+   and prefix caching both disabled (design point 3b below) exactly one
+   captured tensor should have `shape[0] > 1` (the prompt-logprobs one, and
+   its `shape[0]` should be EXACTLY `expected_num_tokens`, not merely `>=`
+   it) and exactly one should have `shape[0] == 1` (the sampled token).
+   **Both are asserted exactly, not bounded loosely and not heuristically
+   selected**: if more than one captured tensor has `shape[0] > 1`,
+   retrieval raises with every such shape listed; if the one multi-position
+   capture's row count isn't exactly `expected_num_tokens`, retrieval raises
+   naming both numbers. An earlier version of this check used `shape[0] <
+   expected_min_positions` -- a `>=` bound -- against a name
+   (`expected_min_positions`) that was actually `len(token_ids) - 1`,
+   already-trimmed. That bound is exactly the class of failure this whole
+   repository exists to catch elsewhere: a loose tolerance in the
+   instrumentation passed silently on `[8, vocab]` when `7` was expected
+   (`8 >= 7`), the same shape as a genuinely correct capture would have
+   looked wrong by, so instrumentation meant to catch a shape mismatch
+   cannot itself use a loose bound to check one. `retrieve_and_clear_logits`
+   now asserts `best.shape[0] == expected_num_tokens` (the raw, untrimmed
+   count) and returns `best[:-1]` (Q6's `[:-1]` slice, applied here so
+   `run_one_prompt` never sees the untrimmed row), which is separately
+   checked to be exactly `expected_num_tokens - 1` before it is converted to
+   the wire tuple (Q7) and returned.
 
    THIS ASSERTION IS ALSO WHAT CATCHES A SECOND, DISTINCT CHUNKING HAZARD,
    independent of `enable_chunked_prefill`: `compute_prompt_logprobs`'s
@@ -542,8 +692,13 @@ DESIGN
    these worker processes).
 
 5. `run_one_prompt(llm, token_ids) -> torch.Tensor` -- ties 2-4 together for
-   one prompt: install, generate, retrieve, uninstall. Returns a
-   `[seq_len - 1, vocab]` float32 CPU tensor -- position 0 dropped, per Q6.
+   one prompt: install, generate, retrieve, uninstall. Reconstructs the
+   tensor from the `(dtype_str, shape_list, raw_bytes)` triple
+   `retrieve_and_clear_logits` returns (Q7) via
+   `torch.frombuffer(raw_bytes, dtype=...).view(shape).clone()`. Returns a
+   `[len(token_ids) - 1, vocab]` float32 CPU tensor -- the last row dropped,
+   not the first, per Q6 -- already sliced by `retrieve_and_clear_logits`
+   before it crossed the wire.
 
 6. `_run_worker` / `measure_differential_floor` -- structurally identical to
    bf16_floor.py's functions of the same name (same one-prompt-at-a-time
@@ -736,25 +891,43 @@ class LogitsHookWorkerExtension:
         model._collective_logits_hook_installed = True
 
     def retrieve_and_clear_logits(
-        self, expected_min_positions: int
-    ) -> "torch.Tensor | None":
-        """Returns the CPU float32 [positions, vocab] tensor captured since
-        the last call (or since install), and clears the buffer. Returns
-        None on every rank whose `compute_logits` never produced a non-None
-        result (Q3) -- i.e. every rank except the one
-        tensor_model_parallel_gather gathered to.
+        self, expected_num_tokens: int
+    ) -> tuple[str, list[int], bytes] | None:
+        """Returns the captured prompt-logprobs tensor since the last call
+        (or since install), and clears the buffer -- as a
+        `(dtype_str, shape_list, raw_bytes)` triple, NOT a `torch.Tensor`.
+        `collective_rpc` cannot carry a `torch.Tensor` back as a return
+        value at this vLLM version (Q7); this triple uses only
+        msgpack-native types (`str`, `list[int]`, `bytes`) so it round-trips
+        intact, and `run_one_prompt` reconstructs the tensor on the other
+        side. Returns None on every rank whose `compute_logits` never
+        produced a non-None result (Q3) -- i.e. every rank except the one
+        `tensor_model_parallel_gather` gathered to.
+
+        `expected_num_tokens` is `len(token_ids)` -- the RAW, UNTRIMMED
+        position count `compute_logits` is actually called with (Q6), not
+        the `len(token_ids) - 1` comparable-row count bf16_floor.py's
+        `output.prompt_logprobs[1:]` produces. This function does the
+        `[:-1]` trim (Q6) itself before returning, so callers never see the
+        untrimmed row.
 
         With chunked prefill and prefix caching disabled (see `_run_worker`'s
         `LLM(...)` call and design point 3b), a single `generate()` call
         with `max_tokens=1` should produce exactly one capture with
-        `shape[0] > 1` (the prompt-logprobs tensor) and exactly one with
-        `shape[0] == 1` (the sampled token) -- see Q1. This is ASSERTED, not
-        heuristically selected, and doubles as the catch for design point
-        3a's independent CHUNK_SIZE=1024 hazard: if either scheduler-level
-        chunking or the fixed-size prompt-logprobs chunk loop fires despite
-        the constructor flags, more than one multi-position capture shows up
-        here, and that is exactly the failure this function exists to
-        surface loudly instead of quietly returning a partial chunk.
+        `shape[0] > 1` (the prompt-logprobs tensor, and its `shape[0]`
+        should be EXACTLY `expected_num_tokens`) and exactly one with
+        `shape[0] == 1` (the sampled token) -- see Q1. Both are ASSERTED
+        EXACTLY, not bounded loosely and not heuristically selected: a
+        loose `>=` bound here would be exactly the kind of instrumentation
+        failure this repository exists to catch elsewhere in what it
+        measures -- see design point 3a for the concrete case this caught.
+        The multiple-capture check also doubles as the catch for design
+        point 3a's independent CHUNK_SIZE=1024 hazard: if either
+        scheduler-level chunking or the fixed-size prompt-logprobs chunk
+        loop fires despite the constructor flags, more than one
+        multi-position capture shows up here, and that is exactly the
+        failure this function exists to surface loudly instead of quietly
+        returning a partial chunk.
         """
         captures = getattr(self, "_collective_logits_captures", [])
         self._collective_logits_captures = []
@@ -775,26 +948,37 @@ class LogitsHookWorkerExtension:
                 "unexpected extra compute_logits call happened."
             )
         if not candidates:
-            # Every capture had exactly 1 position: either the prompt genuinely
-            # has 1 comparable position (expected_min_positions <= 1), or no
-            # prompt-logprobs tensor was captured at all.
-            if expected_min_positions <= 1 and captures:
-                return captures[0]
             raise RuntimeError(
-                f"expected a compute_logits capture with >= {expected_min_positions} "
-                f"positions, but every capture had exactly 1 position: "
-                f"{[tuple(t.shape) for t in captures]}"
+                f"expected one compute_logits capture with shape[0] == "
+                f"{expected_num_tokens} (the untrimmed prompt-logprobs "
+                f"tensor -- Q6), but every capture had exactly 1 position: "
+                f"{[tuple(t.shape) for t in captures]}. The prompt-logprobs "
+                "call site (compute_prompt_logprobs's logits_fn) never fired."
             )
 
         best = candidates[0]
-        if best.shape[0] < expected_min_positions:
+        if best.shape[0] != expected_num_tokens:
             raise RuntimeError(
-                f"captured logits have {best.shape[0]} positions, expected at "
-                f"least {expected_min_positions} -- the compute_logits call "
-                "graph for this request may not match what this hook assumed "
+                f"captured prompt-logprobs tensor has {best.shape[0]} rows, "
+                f"expected EXACTLY {expected_num_tokens} (Q6: compute_logits "
+                "is called on every scheduled position, untrimmed -- not "
+                "already reduced by one) -- the compute_logits call graph "
+                "for this request does not match what this hook assumed "
                 "(see the module docstring's 'what this does not address')"
             )
-        return best
+
+        trimmed = best[:-1].contiguous()  # drop the LAST row, not the first (Q6)
+        if trimmed.shape[0] != expected_num_tokens - 1:
+            raise RuntimeError(
+                f"internal error: trimmed shape {tuple(trimmed.shape)} does "
+                f"not have {expected_num_tokens - 1} rows"
+            )
+
+        # Wire format: msgpack-native types only (Q7). dtype string matches
+        # vLLM's own _encode_tensor convention (str(dtype).removeprefix("torch.")).
+        dtype_str = str(trimmed.dtype).removeprefix("torch.")
+        raw_bytes = trimmed.numpy().tobytes()
+        return dtype_str, list(trimmed.shape), raw_bytes
 
     def uninstall_logits_hook(self) -> None:
         """Restores the original compute_logits so the hook does not leak
@@ -820,10 +1004,11 @@ class LogitsHookWorkerExtension:
 
 def run_one_prompt(llm: Any, token_ids: list[int]) -> "torch.Tensor":
     """Runs one teacher-forced prompt through `llm` and returns a
-    [len(token_ids) - 1, vocab] float32 CPU tensor of raw logits -- position
-    0 dropped, per Q6. Requires `llm` to have been constructed with
-    `worker_extension_cls=WORKER_EXTENSION_QUALNAME`.
+    [len(token_ids) - 1, vocab] float32 CPU tensor of raw logits -- the last
+    row dropped, not the first, per Q6. Requires `llm` to have been
+    constructed with `worker_extension_cls=WORKER_EXTENSION_QUALNAME`.
     """
+    import torch
     from vllm import SamplingParams
 
     llm.collective_rpc("install_logits_hook")
@@ -831,9 +1016,12 @@ def run_one_prompt(llm: Any, token_ids: list[int]) -> "torch.Tensor":
         sp = SamplingParams(max_tokens=1, temperature=0.0, prompt_logprobs=1)
         llm.generate([{"prompt_token_ids": token_ids}], sp, use_tqdm=False)
 
-        expected_min_positions = len(token_ids) - 1
+        # The RAW, untrimmed position count compute_logits is called with
+        # (Q6) -- not len(token_ids) - 1. retrieve_and_clear_logits asserts
+        # against this exact number and does the [:-1] trim itself.
+        expected_num_tokens = len(token_ids)
         results = llm.collective_rpc(
-            "retrieve_and_clear_logits", args=(expected_min_positions,)
+            "retrieve_and_clear_logits", args=(expected_num_tokens,)
         )
         non_none = [r for r in results if r is not None]
         if len(non_none) != 1:
@@ -844,7 +1032,10 @@ def run_one_prompt(llm: Any, token_ids: list[int]) -> "torch.Tensor":
                 "this box (see the module docstring's Q3 answer), which "
                 "would mean every rank returns the same tensor instead."
             )
-        return non_none[0]
+        # collective_rpc cannot carry a torch.Tensor back as a return value
+        # at this vLLM version (Q7) -- reconstruct from the wire triple.
+        dtype_str, shape, raw_bytes = non_none[0]
+        return torch.frombuffer(raw_bytes, dtype=getattr(torch, dtype_str)).view(shape).clone()
     finally:
         llm.collective_rpc("uninstall_logits_hook")
 
