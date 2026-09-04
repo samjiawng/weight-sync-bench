@@ -1,0 +1,64 @@
+{
+  "phase": "2a",
+  "finding_type": "LIMITATION of the harness (not a bug)",
+  "title": "Break-case detection is calibrated at the single most favorable layer; the drop from layer 0 is a step, not a depth gradient",
+  "note": [
+    "Supersedes this artifact's own prior version, which compared only layer 0 against layer 13 and inferred a monotonic-depth-decay mechanism from those two points. That mechanism is now refuted by a five-point sweep. This version records the sweep, both refuted mechanism hypotheses, a third candidate marked explicitly as unconfirmed inference, and the sharper consequence for the gate.",
+    "SWEEP: --layer in {0, 7, 13, 20, 27} (28 layers total, 0-indexed, so 27 is the last), all five runs at --tp 2 --repetitions 20 --batch 2 --seq-len 8 (the exact configuration tolerance/phase2a_bf16_floor_v2.json's reproduction used). Floor mean_deviation is IDENTICAL across all five runs (3.898e-02) as expected -- the floor has no injection and cannot depend on where a break case would target; the whole effect below is confined to the break-case legs.",
+    "DATA (mean_deviation per case, threshold 5.847e-01 = 15 * 3.898e-02): layer 0 -- case1 1.772, case2 1.570, case3 2.984, verdict PASS (weakest case2 clears threshold by 2.685x). layer 7 -- case1 0.2766, case2 0.2265, case3 0.2675, verdict FAIL. layer 13 -- case1 0.2269, case2 0.1617, case3 0.4996, verdict FAIL. layer 20 -- case1 0.4449, case2 0.2092, case3 1.052, verdict FAIL (case3 alone would individually clear the threshold at this layer -- 1.052 > 0.5847 -- but the gate verdict is per-configuration, gated on the WEAKEST case, which is case2 at every layer tested). layer 27 -- case1 0.5227, case2 0.2150, case3 0.4448, verdict FAIL.",
+    "BOTH PRIOR MECHANISM HYPOTHESES ARE REFUTED BY THIS SWEEP. (1) The distribution-specific hypothesis (case 3 tracks that layer's own norm-weight distribution while cases 1/2 hold steady) was already refuted by the two-point layer-0-vs-13 comparison (all three cases moved by a similar factor there) and remains refuted here. (2) The monotonic-depth-decay hypothesis floated after that same two-point comparison (break magnitude decreases steadily with distance from the logits, ~0.85x per layer) is ALSO refuted by this sweep: it predicted a smooth decrease from layer 0 through 27, with layer 27 the SMALLEST. Neither holds. Layer 0 sits 2.8x-11.2x above the corresponding case at every other tested layer (per-case ratios: case1 3.4x-7.8x, case2 6.9x-9.7x, case3 2.8x-11.2x, computed layer0-value / layerN-value across N in {7,13,20,27}). Layers 7 through 27, in contrast, form a band with mild NON-monotonic structure: case1 rises gently from layer 7 (0.2766) to layer 27 (0.5227); case2 is close to flat (0.2265 to 0.2150, no clear trend); case3 peaks at layer 20 (1.052) rather than decreasing monotonically toward 27 (0.4448 there, lower than at layer 0's neighbor 7 at 0.2675 -- not monotonic in either direction).",
+    "A THIRD CANDIDATE, MARKED EXPLICITLY AS AN UNCONFIRMED INFERENCE -- not a traced mechanism, and offered after two prior mechanism guesses from this same investigation were both wrong: layer 0 is the only layer whose input is the raw token embedding rather than a residual stream that already carries accumulated contributions from every preceding block. A perturbation injected there acts on a signal with nothing else yet mixed in, and is then carried through and amplified across all 27 subsequent blocks with no prior dilution; a perturbation injected at any other layer is added into a stream that already carries most of the eventual representation, competing with everything already accumulated. This candidate predicts exactly the shape the data shows -- a STEP between layer 0 and every other layer, not a gradient across layers 7-27 -- where the refuted monotonic-decay hypothesis predicted a gradient across ALL layers including 0. It has not been confirmed by any residual-stream instrumentation; it is offered because it fits the observed step shape, not because it has been traced.",
+    "CONSEQUENCE FOR THE GATE, SHARPER THAN THE PRIOR (TWO-POINT) VERSION OF THIS FINDING: calibration at layer 0 is calibration at the single most favorable position in the model, and because the drop is a STEP rather than a GRADIENT, it cannot be corrected by a depth-dependent threshold (i.e. there is no way to scale SAFETY_FACTOR/GATE_MARGIN smoothly by distance-from-logits and have it track this data -- layers 7 through 27 fail by roughly similar amounts regardless of depth, so a depth-indexed correction would either still fail the non-zero layers or over-correct layer 0). Every one of the four non-zero layers tested fails the gate on its weakest case (case2 in all four); layer 0 is the only layer, of the five tested, where this gate's current constants would catch an injected bug of this shape and magnitude.",
+    "WHAT WOULD DISCRIMINATE FURTHER, NOT YET RUN: this sweep already answers the immediate question (is layer 0 representative -- no) and identifies the step as being specifically between layer 0 and layer 7, but does not test layers 1-6, so the step's exact location (is it a hard boundary right after layer 0, or a fast-but-continuous drop across the first few layers) is unresolved. A finer sweep over {0,1,2,3,4,5,6,7} would locate it. Separately, the embedding-input candidate above could be tested directly (not merely inferred) by instrumenting residual-stream norms at each block boundary during a forward pass and checking whether the perturbation's relative contribution to the stream drops sharply after layer 0 specifically, rather than gradually -- this needs the box and has not been attempted."
+  ],
+  "sweep": {
+    "tp": 2,
+    "repetitions": 20,
+    "batch": 2,
+    "seq_len": 8,
+    "floor_mean_deviation": 3.898e-02,
+    "threshold": 5.847e-01,
+    "results": [
+      { "layer": 0,  "case1_qkv_head_permute": 1.772,  "case2_oproj_col_permute": 1.570,  "case3_norm_permute": 2.984, "weakest_case": "case2_oproj_col_permute", "weakest_over_threshold": 2.685, "verdict": "PASS" },
+      { "layer": 7,  "case1_qkv_head_permute": 0.2766, "case2_oproj_col_permute": 0.2265, "case3_norm_permute": 0.2675, "weakest_case": "case2_oproj_col_permute", "threshold_over_weakest": 2.581, "verdict": "FAIL" },
+      { "layer": 13, "case1_qkv_head_permute": 0.2269, "case2_oproj_col_permute": 0.1617, "case3_norm_permute": 0.4996, "weakest_case": "case2_oproj_col_permute", "threshold_over_weakest": 3.616, "verdict": "FAIL" },
+      { "layer": 20, "case1_qkv_head_permute": 0.4449, "case2_oproj_col_permute": 0.2092, "case3_norm_permute": 1.052,  "weakest_case": "case2_oproj_col_permute", "threshold_over_weakest": 2.795, "verdict": "FAIL", "note": "case3 alone (1.052) individually clears the threshold at this layer; the gate verdict is still FAIL because it gates on the weakest case, case2." },
+      { "layer": 27, "case1_qkv_head_permute": 0.5227, "case2_oproj_col_permute": 0.2150, "case3_norm_permute": 0.4448, "weakest_case": "case2_oproj_col_permute", "threshold_over_weakest": 2.720, "verdict": "FAIL" }
+    ]
+  },
+  "layer0_over_layerN_ratios": {
+    "case1_qkv_head_permute": { "7": 6.41, "13": 7.81, "20": 3.98, "27": 3.39 },
+    "case2_oproj_col_permute": { "7": 6.93, "13": 9.71, "20": 7.50, "27": 7.30 },
+    "case3_norm_permute": { "7": 11.16, "13": 5.97, "20": 2.84, "27": 6.71 }
+  },
+  "refuted_hypotheses": [
+    "H1 (distribution-specific, from the break-case-ordering-inversion investigation): case 3 tracks that layer's own norm-weight distribution while cases 1/2 hold steady. Refuted by the original layer-0-vs-13 comparison (all three cases moved by a similar factor) and remains refuted here.",
+    "H2 (monotonic depth decay, floated after H1's refutation): break magnitude decreases steadily with distance from the logits across all 28 layers, ~0.85x per layer. Refuted by this sweep: layer 27 is not the smallest value for any case, and layers 7-27 show mild non-monotonic structure (case1 rises 7->27, case2 is flat, case3 peaks at 20) rather than a steady decrease."
+  ],
+  "candidate_mechanism_unconfirmed": "Layer 0 is uniquely the raw-token-embedding input, not an already-accumulated residual stream; a perturbation there is carried through and amplified across all 27 subsequent blocks with no prior dilution, while a perturbation at any other layer competes with a stream that already carries most of the eventual representation. Predicts a STEP between layer 0 and the rest, matching the observed shape, where H2 predicted a gradient across all layers including 0. Explicitly marked as inference from the observed shape, not a traced mechanism -- offered after two prior mechanism guesses in this same investigation (the distribution-specific one and the monotonic-decay one) were both wrong.",
+  "consequence": "Calibration at layer 0 is calibration at the single most favorable position in the model. Because the drop is a step (layer 0 vs. everything else) rather than a gradient across layers, it cannot be corrected by a depth-dependent threshold -- there is no smooth depth-indexed scaling of SAFETY_FACTOR/GATE_MARGIN that tracks this data. Every one of the four non-zero layers tested fails the gate on its weakest case (case2 in all four); layer 0 is the only layer, of the five tested, where the current gate would catch an injected bug of this shape and magnitude.",
+  "next_test_not_run": "Finer sweep over layers {1,2,3,4,5,6} to locate the step precisely (hard boundary right after layer 0, vs. a fast-but-continuous drop over the first few layers). Separately, direct residual-stream-norm instrumentation during a forward pass to test the embedding-input candidate mechanism rather than merely infer it from the outcome shape.",
+  "model": "Qwen/Qwen3-0.6B",
+  "pinned_vllm_version": "0.28.0",
+  "dtype": "torch.bfloat16",
+  "safety_factor": 15,
+  "gate_margin": 2,
+  "environment": {
+    "note": "Reported into this session as the same box already used for tolerance/phase2b_layout.json's TP=1/2/4 confirmation run and this artifact's prior (layer 0 vs 13) version (4x A100-SXM4-80GB, driver 580.159.04) -- not independently reconfirmed for this specific sweep; python/platform/machine/torch/cuda strings were not restated and are left null rather than guessed.",
+    "provider": null,
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "driver_version": "580.159.04",
+    "cuda_version": null,
+    "cuda_available": true,
+    "torch": null,
+    "vllm_installed_version": "0.28.0",
+    "python": null,
+    "platform": null,
+    "machine": null,
+    "device": "cuda",
+    "git_commit": null,
+    "git_commit_note": "Not captured by the run; not included in what was reported into this session, so left null rather than guessed."
+  },
+  "git_commit_at_artifact_authoring": "639bc755134b25c1acf82a3683dd43d3ac7bd45e",
+  "generated_at": "2026-09-04T22:27:58+00:00"
+}

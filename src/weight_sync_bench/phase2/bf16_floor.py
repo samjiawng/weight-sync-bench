@@ -488,6 +488,21 @@ def corrupt_checkpoint(src_dir: str, dst_dir: Path, case: str, layer: int = 0) -
     layer `layer`'s tensors and re-save. `dst_dir` is a full, loadable HF-format
     checkpoint directory afterward -- `LLM(model=dst_dir)` goes through vLLM's real
     loader exactly as it would for the original checkpoint.
+
+    `layer` defaulting to 0 everywhere this is called from (bf16_floor.py's own
+    `run_break_case`, and bf16_floor_v2.py's until its `--layer` flag was added)
+    is NOT a benign scope choice -- see SPEC.md 2a's "LIMITATION: the gate is
+    calibrated at the single most favorable layer" and
+    `tolerance/phase2a_layer_depth_finding.json`. A five-point sweep
+    (`--layer` in `{0,7,13,20,27}`, same repetitions/batch/seq_len as the
+    recorded gate) found layer 0 alone PASSES; all four other layers FAIL on
+    every case, sitting 2.8x-11.2x below layer 0's magnitude with no
+    monotonic depth trend among themselves (ruling out a simple
+    distance-to-logits decay). It is a step between layer 0 and every other
+    layer, not a gradient -- `SAFETY_FACTOR`/`GATE_MARGIN` were derived from
+    layer-0 measurements only, and the drop cannot be corrected by a
+    depth-dependent threshold since layers 7-27 fail by similar amounts
+    regardless of depth.
     """
     import torch
     from safetensors.torch import load_file, save_file

@@ -109,13 +109,23 @@ WHAT'S DIFFERENT
   accepted a `layer` argument -- no change there). `measure_differential_
   floor`/`run_break_case`/`_measure_one_config` all take `tp`/`layer` now,
   default `tp=2, layer=0` so every prior recorded run reproduces unchanged.
-  `--tp 4` checks SAFETY_FACTOR=15/GATE_MARGIN=2 at a third configuration
+  `--tp 4` checked SAFETY_FACTOR=15/GATE_MARGIN=2 at a third configuration
   axis the two recorded separation-ratio bands (batch=2/seq_len=8 and
   batch=4/seq_len=128, both TP=2 -- see the SAFETY_FACTOR comment in
-  bf16_floor.py) never covered; `--layer N` (N != 0) checks whether the
-  break cases' layer-0 hardcoding was a scope choice or a hidden dependency
-  (every layer shares the same geometry/placement, so a materially
-  different magnitude at another layer would be a finding, not expected).
+  bf16_floor.py) never covered -- **TP degree does not move the ratio**:
+  floor and break-case means at TP=4 are within 1.5% of TP=2's at the same
+  configuration, and the resulting 40.9x separation sits inside TP=2's own
+  band rather than forming a new one (`tolerance/phase2a_bf16_floor_v2_tp4.json`).
+  `--layer N` (N != 0) checked whether the break cases' layer-0 hardcoding
+  was a scope choice or a hidden dependency -- **it is a hidden dependency,
+  not a scope choice**, and sharper than a single non-zero layer suggested:
+  a five-point sweep (`--layer` in `{0,7,13,20,27}`) found layer 0 ALONE
+  passes; every other layer fails on every case, 2.8x-11.2x below layer 0's
+  magnitude with no monotonic depth trend among the non-zero layers (a step
+  between layer 0 and the rest, not a depth gradient -- two successive
+  mechanism hypotheses about *why* were each refuted by more data). See
+  SPEC.md 2a's "LIMITATION: the gate is calibrated at the single most
+  favorable layer" and `tolerance/phase2a_layer_depth_finding.json`.
   Non-default `(tp, layer)` combinations write to a suffixed artifact path
   (`_artifact_path`) rather than overwriting the canonical
   `tolerance/phase2a_bf16_floor_v2.json` record.
@@ -340,10 +350,15 @@ def run_break_case(
     is for).
 
     `layer` forwards to `corrupt_checkpoint` (which has always accepted it,
-    default 0 -- no change needed there). Every layer shares the same
-    geometry and placement (SPEC.md 2b), so a non-zero layer is expected to
-    produce a materially similar break magnitude to layer 0; this parameter
-    exists to check that expectation rather than assume it.
+    default 0 -- no change needed there). The expectation that every layer
+    (sharing the same geometry and placement, SPEC.md 2b) would give a
+    materially similar break magnitude to layer 0 was WRONG -- see SPEC.md
+    2a's "LIMITATION: the gate is calibrated at the single most favorable
+    layer" and `tolerance/phase2a_layer_depth_finding.json`: a five-point
+    sweep found layer 0 alone passes the gate; every other layer tested
+    fails on every case, and the four non-zero layers do not differ from
+    each other the way a depth-dependent decay would predict -- it is a
+    step between layer 0 and the rest, not a gradient.
     """
     import tempfile
 
@@ -463,10 +478,11 @@ def main() -> None:
             "Layer index the break-case corruption targets (forwarded to "
             "bf16_floor.corrupt_checkpoint, which has always accepted this -- "
             "no change needed there). Default 0 reproduces every artifact "
-            "recorded before this flag existed. Every layer shares the same "
-            "geometry and placement, so a non-zero layer is expected to "
-            "produce a materially similar break magnitude to layer 0; this "
-            "flag exists to check that, not assume it."
+            "recorded before this flag existed. KNOWN NOT LAYER-INVARIANT: a "
+            "5-point sweep found layer 0 ALONE passes the gate; every other "
+            "layer tested (7, 13, 20, 27) fails on every case, with no "
+            "depth-monotonic trend among them (a step, not a gradient) -- "
+            "see tolerance/phase2a_layer_depth_finding.json."
         ),
     )
     parser.add_argument("--repetitions", type=int, default=DEFAULT_REPETITIONS)

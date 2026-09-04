@@ -1,0 +1,75 @@
+{
+  "phase": "2a",
+  "note": [
+    "TP=4 run of weight_sync_bench.phase2.bf16_floor_v2 at the exact configuration tolerance/phase2a_bf16_floor_v2.json's reproduction used (--repetitions 20 --batch 2 --seq-len 8), enabled by this session's --tp {1,2,4} generalization (previously --tp was accepted at the top level but never read; every prior run used TP=2 unconditionally regardless of the flag). This file is HAND-ASSEMBLED from reported results, not pulled from the box as machine-generated JSON -- unlike tolerance/phase2a_bf16_floor_v2.json itself, which is the real --sweep-seq-len output. The run was made specifically to answer whether TP degree is a third configuration axis for the separation ratio, alongside the two already-measured bands (batch=2/seq_len=8 at TP=2: 40.3x-42.6x across independent seed draws; batch=4/seq_len=128 at TP=2: 67.6x-69.9x -- see bf16_floor.py's SAFETY_FACTOR comment).",
+    "ANSWER: NO. TP=4's floor (3.840e-02) and all three break-case means (1.775 / 1.572 / 3.004) are within 1.5% of TP=2's recorded values at the identical configuration (floor 3.898e-02; breaks 1.772 / 1.570 / 2.984) -- the floor differs by -1.49%, the three break-case means by +0.17%, +0.13%, +0.67% respectively. The separation ratio (weakest break / floor) is 40.9x at TP=4 against 40.3x-42.6x at TP=2 across independent seed draws at this same configuration -- inside that same band, not a new one. Unlike batch and seq_len, which each move the separation ratio to a materially different band (40x vs 68x), TP degree does not move it at all within measurement noise. This is consistent with the differential design's own premise (SPEC.md, phase 2a 'What to run'): the floor and the break-case injections are properties of dtype, reduction order, and the checkpoint's weight distribution, none of which TP degree changes -- TP=4 exercises a different vLLM-internal sharding of the same computation, not a different computation.",
+    "GATE VERDICT: PASS. Weakest case (case2_oproj_col_permute, 1.572) clears the threshold (15 * 3.840e-02 = 0.576) by 2.729x, essentially identical to TP=2's 2.685x clearance at the same configuration.",
+    "This does not by itself confirm every one of tolerance/phase2a_bf16_floor_v2.json's own sweep findings (seq_len invariance, prefix-caching independence) at TP=4 -- only this one configuration (repetitions=20, batch=2, seq_len=8) was run at TP=4. A TP=4 seq_len/batch sweep, analogous to the TP=2 one already recorded, has not been done."
+  ],
+  "configuration": {
+    "model": "Qwen/Qwen3-0.6B",
+    "tensor_parallel_size": 4,
+    "dtype": "torch.bfloat16",
+    "enforce_eager": true,
+    "enable_chunked_prefill": false,
+    "enable_prefix_caching": false,
+    "worker_extension_cls": "weight_sync_bench.phase2.collective_logits.LogitsHookWorkerExtension",
+    "extraction_method": "collective_rpc"
+  },
+  "measurement": {
+    "repetitions": 20,
+    "batch": 2,
+    "seq_len": 8,
+    "seed_base": 0,
+    "tp": 4,
+    "layer": 0
+  },
+  "floor": {
+    "mean_deviation": 3.840e-02,
+    "threshold": 5.760e-01
+  },
+  "break_cases": {
+    "case1_qkv_head_permute": 1.775,
+    "case2_oproj_col_permute": 1.572,
+    "case3_norm_permute": 3.004
+  },
+  "separation_ratio": {
+    "weakest_case": "case2_oproj_col_permute",
+    "weakest_over_floor": 40.9,
+    "weakest_over_threshold": 2.729
+  },
+  "comparison_to_tp2_same_configuration": {
+    "tp2_floor_mean_deviation": 3.898e-02,
+    "tp2_break_cases": { "case1_qkv_head_permute": 1.772, "case2_oproj_col_permute": 1.570, "case3_norm_permute": 2.984 },
+    "pct_diff_floor": -1.49,
+    "pct_diff_case1": 0.17,
+    "pct_diff_case2": 0.13,
+    "pct_diff_case3": 0.67,
+    "conclusion": "TP degree is not a third axis for the separation ratio the way batch and seq_len are -- every value is within 1.5% of TP=2 at the same configuration."
+  },
+  "gate": {
+    "verdict": "PASS"
+  },
+  "model": "Qwen/Qwen3-0.6B",
+  "pinned_vllm_version": "0.28.0",
+  "dtype": "torch.bfloat16",
+  "environment": {
+    "note": "Reported into this session as the same box already used for tolerance/phase2b_layout.json and tolerance/phase2a_layer_depth_finding.json (4x A100-SXM4-80GB, driver 580.159.04) -- not independently reconfirmed for this specific run; python/platform/machine/torch/cuda strings were not restated and are left null rather than guessed.",
+    "provider": null,
+    "gpu_count_used_this_run": 4,
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "driver_version": "580.159.04",
+    "cuda_version": null,
+    "cuda_available": true,
+    "torch": null,
+    "vllm_installed_version": "0.28.0",
+    "python": null,
+    "platform": null,
+    "machine": null,
+    "device": "cuda",
+    "git_commit": null,
+    "git_commit_note": "Not captured by the run; not included in what was reported into this session, so left null rather than guessed."
+  },
+  "git_commit_at_artifact_authoring": "639bc755134b25c1acf82a3683dd43d3ac7bd45e",
+  "generated_at": "2026-09-04T22:27:58+00:00"
+}

@@ -661,6 +661,71 @@ instantiated for a controlled, same-operation comparison. Full numbers are in
   not -- it is a statement about the two models' weights and the two independently re-derived
   injection operations, not about dtype.
 
+### LIMITATION: the gate is calibrated at the single most favorable layer, and the drop is a step, not a gradient
+
+Every break case above injects at layer 0 (`corrupt_checkpoint`'s `layer` parameter, default 0,
+never varied by any run this gate's PASS verdict rests on). A five-point sweep, `--layer` in
+`{0, 7, 13, 20, 27}` (28 layers total, 0-indexed), all at `--tp 2 --repetitions 20 --batch 2
+--seq-len 8` (`tolerance/phase2a_layer_depth_finding.json`), refutes both mechanism hypotheses
+this investigation produced along the way and lands on a sharper, still-unresolved finding.
+
+- **The floor is identical across all five layers (3.898e-02)**, as expected -- it has no
+  injection, so it cannot depend on where a break case would target. The effect below is entirely
+  in the break-case legs.
+- **DATA** (mean_deviation, threshold 5.847e-01): layer 0 -- 1.772 / 1.570 / 2.984, **PASS** (2.7x
+  clearance). layer 7 -- 0.2766 / 0.2265 / 0.2675, FAIL. layer 13 -- 0.2269 / 0.1617 / 0.4996,
+  FAIL. layer 20 -- 0.4449 / 0.2092 / 1.052, FAIL (case3 alone would individually clear the
+  threshold here, but the verdict gates on the weakest case, case2, which does not). layer 27 --
+  0.5227 / 0.2150 / 0.4448, FAIL.
+- **BOTH PRIOR HYPOTHESES ARE REFUTED.** The first (case 3 tracks that layer's own norm-weight
+  distribution while cases 1/2 hold steady, from the ordering-inversion investigation above) was
+  already refuted by the initial layer-0-vs-13 comparison. The second, floated after that
+  refutation -- monotonic depth decay, break magnitude falling steadily with distance from the
+  logits -- is now ALSO refuted: it predicted layer 27 would be smallest, and it isn't for any
+  case; layers 7-27 instead form a band with mild non-monotonic structure (case1 rises gently
+  7->27, case2 is roughly flat, case3 peaks at layer 20). **Layer 0 sits 2.8x-11.2x above the
+  corresponding case at every other tested layer; layers 7 through 27 do not differ from each
+  other by anything resembling that gap.** This is a step between layer 0 and the rest, not a
+  gradient across depth.
+- **A third candidate, offered after two wrong guesses and marked accordingly as inference, not a
+  traced mechanism:** layer 0 is the only layer whose input is the raw token embedding rather than
+  a residual stream already carrying accumulated contributions from every preceding block. A
+  perturbation there acts on a signal with nothing else yet mixed in and is then amplified across
+  all 27 subsequent blocks with no prior dilution; everywhere else, the perturbation competes with
+  a stream that already carries most of the eventual representation. This predicts a step between
+  layer 0 and everywhere else, matching what the sweep shows -- but it has not been confirmed by
+  residual-stream instrumentation, only inferred from the outcome shape.
+- **Consequence, sharper than before: this cannot be fixed by a depth-dependent threshold.** A
+  smooth depth-indexed correction to `SAFETY_FACTOR`/`GATE_MARGIN` would need the failure to scale
+  with depth; it doesn't -- layers 7 through 27 fail by broadly similar amounts regardless of how
+  far they are from layer 0. Of the five layers tested, **layer 0 is the only one where the
+  current gate would catch an injected bug of this shape and magnitude.** Calibrating at layer 0
+  is calibrating at the single most favorable position in the model, not a representative one.
+- **Next test, not yet run**: a finer sweep over layers `{1,...,6}` to locate the step precisely
+  (a hard boundary right after layer 0, versus a fast-but-continuous drop over the first few
+  layers), and direct residual-stream-norm instrumentation during a forward pass to test the
+  embedding-input candidate rather than merely infer it.
+
+This affects any future break-case reinjection built against 2b's real resharder (see 2b's
+"What's left" note) too: whatever layer(s) that reinjection targets should not default to layer 0
+without accounting for this.
+
+### TP degree is not a third axis for the separation ratio
+
+The separation ratio (weakest break / floor) has two measured bands at TP=2: 40.3x-42.6x at
+batch=2/seq_len=8, and 67.6x-69.9x at batch=4/seq_len=128 (see the `SAFETY_FACTOR` comment in
+`bf16_floor.py`). A TP=4 run at the batch=2/seq_len=8 configuration
+(`tolerance/phase2a_bf16_floor_v2_tp4.json`) checks whether TP degree moves it the way batch and
+seq_len do. It does not: floor 3.840e-02 and break-case means 1.775 / 1.572 / 3.004 are within
+1.5% of TP=2's recorded values at the identical configuration (floor -1.49%, breaks +0.17%/+0.13%/
++0.67%), and the resulting separation ratio (40.9x) sits inside the same TP=2 band rather than
+forming a new one. Consistent with the differential design's premise: the floor and break-case
+magnitudes are properties of dtype, reduction order, and the checkpoint's weight distribution,
+none of which TP degree changes -- TP=4 shards the same computation differently, it does not
+change what is being computed. (This single configuration does not by itself confirm TP=2's
+already-recorded seq_len-invariance or prefix-caching-independence findings hold at TP=4 too --
+only that the separation ratio itself does not move with TP degree at this one point.)
+
 ---
 
 ## 2b. Real layout tables
