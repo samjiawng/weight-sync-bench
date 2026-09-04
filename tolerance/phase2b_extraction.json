@@ -1,0 +1,94 @@
+{
+  "phase": "2b",
+  "note": [
+    "Verifies weight_sync_bench.phase2.collective_logits, the collective_rpc-based replacement for bf16_floor.py's prompt_logprobs=-1 extraction path (SPEC.md phase 2, section 2a follow-up). Two things are recorded here: a correctness check (bit-identity between the two extraction paths on the same prompt) and a timing sweep (wall-clock cost of each path at three seq_len values). Both were run on the real GPU box; this file was assembled from that report, not executed by the session that authored it -- this repo's dev machine is CPU-only and cannot run vLLM.",
+    "BIT-IDENTITY, TP=1, 8-token prompt: bf16_floor.py's prompt_logprobs=-1 path and collective_logits.py's hook-and-byte-buffer path produced torch.equal [7, 151936] float32 tensors -- exact equality, not approximate, per the module docstring's SMOKE TEST section (no dtype conversion, no reduction-order change, no extra forward pass between them; both read the same compute_logits return value for the same tokens on the same loaded model, so any difference at all would be a bug in one of the two paths). This confirms every mechanism collective_logits.py's docstring had reasoned about from source but not executed: the worker_extension_cls injection (Q2) actually registers the extension's methods as callable via collective_rpc's string dispatch; the type(runner).__module__ == 'vllm.v1.worker.gpu.model_runner' assertion (Q1) correctly identifies the V2 runner that is actually active for Qwen3-0.6B; the (dtype_str, shape_list, raw_bytes) byte-buffer transport (Q7) round-trips through collective_rpc without VLLM_ALLOW_INSECURE_SERIALIZATION; and the [:-1] slice (Q6) drops the correct (last, not first) row so the two paths compare the same 7 positions.",
+    "TIMING: the old path scales with seq_len (present in every row: mean, both O(positions * vocab) construction loops the module docstring's PROBLEM section names -- vLLM's own LogprobsProcessor._update_prompt_logprobs Python-object loop, and bf16_floor.py's own second scatter loop over output.prompt_logprobs). The new path's wall time barely moves (0.055s -> 0.086s -> 0.289s across an 8x -> 32x seq_len jump then a 4x further jump) because it is dominated by fixed per-call cost (LLM.generate()'s scheduling/dispatch overhead, collective_rpc's two round trips), not by anything that scales with vocab_size * positions -- consistent with the design's premise that moving the raw tensor once, instead of materializing one Python object per (position, vocab-entry), removes the scaling term entirely. The reported speedup (old_seconds / new_seconds) therefore GROWS with seq_len rather than holding constant: 272.7x at seq_len=8, 765.8x at seq_len=32, 932.5x at seq_len=128.",
+    "SPEEDUP CROSS-CHECK: recomputing old_seconds / new_seconds from the rounded (3-decimal) seconds columns gives 274.3x / 767.1x / 932.1x -- close to but not exactly the reported 272.7x / 765.8x / 932.5x. This is expected display-rounding noise (the reported speedup was almost certainly computed from higher-precision underlying timer values before the seconds columns were rounded for the table), not a discrepancy in the measurement; both are recorded below.",
+    "THIS EXTRACTION-METHOD VERIFICATION DOES NOT BY ITSELF SUPERSEDE tolerance/phase2a_bf16_floor.json's recorded floor. It confirms the NEW extraction path measures the same thing the OLD one did (bit-identity) and does so far faster -- which is what unblocks re-running the actual differential-floor sweep (TP=1 vs TP=2, batch>1, more repetitions, larger seq_len) using collective_logits.py instead of bf16_floor.py -- but that sweep itself has not been run yet. collective_logits.py's own module docstring states this explicitly: TP=2, batch>1, and the full repetitions loop remain unverified beyond this single-prompt, TP=1 smoke test and timing sweep.",
+    "PROVENANCE NARROWING APPLIES: this run used TP=1 (one GPU of the host's two), enforce_eager=True, enable_chunked_prefill=False, enable_prefix_caching=False, Qwen3-0.6B, bf16 -- the same discipline tolerance/phase1a.json and tolerance/phase2a_bf16_floor.json already establish for this repo's artifacts. Provider, python version, and platform/machine strings were not restated in this report; the driver_version (580.126.16) matches tolerance/phase2a_bf16_floor.json's run20_folded_in host exactly, so this is very likely the same physical machine, but that identity is inferred from the matching driver version, not independently confirmed here, and is recorded as such in 'environment' below rather than copied over as fact."
+  ],
+  "bit_identity": {
+    "prompt_length_tokens": 8,
+    "tensor_shape": [7, 151936],
+    "dtype": "float32",
+    "comparison": "torch.equal",
+    "result": "PASS -- exact equality",
+    "extraction_methods_compared": {
+      "old": "bf16_floor.py: SamplingParams(prompt_logprobs=-1) + output.prompt_logprobs[1:] scatter loop",
+      "new": "collective_logits.py: LogitsHookWorkerExtension.install_logits_hook / retrieve_and_clear_logits / uninstall_logits_hook via collective_rpc, SamplingParams(prompt_logprobs=1)"
+    },
+    "mechanisms_confirmed": [
+      "worker_extension_cls dotted-path injection makes LogitsHookWorkerExtension's methods callable via collective_rpc string dispatch (Q2)",
+      "type(runner).__module__ == 'vllm.v1.worker.gpu.model_runner' correctly identifies the active V2 runner for Qwen3-0.6B (Q1)",
+      "(dtype_str, shape_list, raw_bytes) byte-buffer transport round-trips through collective_rpc without VLLM_ALLOW_INSECURE_SERIALIZATION (Q7)",
+      "the [:-1] slice drops the correct (last, not first) row (Q6)",
+      "compute_logits monkeypatch is correctly intercepted under enforce_eager=True (no torch.compile/cudagraph interference observed)"
+    ]
+  },
+  "timing": {
+    "warmup_iterations": 1,
+    "timed_iterations": 3,
+    "configuration": {
+      "model": "Qwen/Qwen3-0.6B",
+      "tensor_parallel_size": 1,
+      "dtype": "torch.bfloat16",
+      "enforce_eager": true,
+      "enable_chunked_prefill": false,
+      "enable_prefix_caching": false
+    },
+    "results": [
+      {
+        "seq_len": 8,
+        "transported_payload_bytes_approx": 4254208,
+        "old_extraction_seconds": 15.088,
+        "new_extraction_seconds": 0.055,
+        "speedup_reported": 272.7,
+        "speedup_recomputed_from_rounded_seconds": 274.3
+      },
+      {
+        "seq_len": 32,
+        "transported_payload_bytes_approx": 18840064,
+        "old_extraction_seconds": 65.968,
+        "new_extraction_seconds": 0.086,
+        "speedup_reported": 765.8,
+        "speedup_recomputed_from_rounded_seconds": 767.1
+      },
+      {
+        "seq_len": 128,
+        "transported_payload_bytes_approx": 77183488,
+        "old_extraction_seconds": 269.363,
+        "new_extraction_seconds": 0.289,
+        "speedup_reported": 932.5,
+        "speedup_recomputed_from_rounded_seconds": 932.1
+      }
+    ],
+    "old_path_scaling": "roughly linear in seq_len (positions), consistent with O(positions * vocab) Logprob object construction inside vLLM (LogprobsProcessor._update_prompt_logprobs) plus the second O(positions * vocab) scatter loop in bf16_floor.py._run_worker",
+    "new_path_scaling": "dominated by fixed per-call cost (generate() scheduling/dispatch, two collective_rpc round trips), not by positions * vocab -- wall time moved only 0.055s -> 0.086s -> 0.289s across an 8x then 4x seq_len increase, so measured speedup grows with seq_len rather than holding constant"
+  },
+  "model": "Qwen/Qwen3-0.6B",
+  "pinned_vllm_version": "0.28.0",
+  "dtype": "torch.bfloat16",
+  "environment": {
+    "note": "provider, python, platform, and machine were not restated in the report this artifact was assembled from. driver_version matches tolerance/phase2a_bf16_floor.json's run20_folded_in environment exactly, so this is very likely the same physical host -- inferred from that match, not independently confirmed here.",
+    "provider": null,
+    "gpu_count_used_this_run": 1,
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "driver_version": "580.126.16",
+    "cuda_version": "13.0",
+    "cuda_available": true,
+    "torch": "2.13.0+cu130",
+    "vllm_installed_version": "0.28.0",
+    "python": null,
+    "platform": null,
+    "machine": null,
+    "model": "Qwen/Qwen3-0.6B",
+    "pinned_vllm_version": "0.28.0",
+    "dtype": "torch.bfloat16",
+    "device": "cuda",
+    "git_commit": null,
+    "git_commit_note": "Not captured by the run; not included in what was reported into this session, so left null rather than guessed."
+  },
+  "git_commit_at_artifact_authoring": "0cda94d712872ed6c9e7b9c6bb48cb9d41b62fb5",
+  "generated_at": "2026-09-04T03:25:45+00:00"
+}

@@ -481,13 +481,22 @@ before setting any constant. Full numbers and provenance for both hosts are in
 - **Provenance narrowing applies unchanged from phase 1.** The floor is specific to Qwen3-0.6B,
   bf16, and the (batch, seq_len) it was measured at (2, 8) here. 2b must re-measure if the model,
   dtype, batch, or seq_len change.
-- **Seq_len dependence is untested.** A run at `--repetitions 20 --batch 4 --seq-len 64` was
+- **Seq_len dependence is still untested for the floor itself, but the extraction bottleneck that
+  blocked measuring it is resolved.** A run at `--repetitions 20 --batch 4 --seq-len 64` was
   started and killed after an hour without completing: vLLM's `prompt_logprobs=-1` extraction path
   builds on the order of 150k Python `Logprob` objects per position (one per vocab entry shown,
-  `vocab_size=151936`), and that does not scale to seq_len=64, batch=4. This is a cost of the
-  from-disk logprobs API `bf16_floor.py` currently uses, not a phase-2a physics finding. Replacing
-  it with a `collective_rpc` call that returns the logits tensor directly is 2b work, and is needed
-  for the weight-sync path itself regardless of this measurement.
+  `vocab_size=151936`), and that does not scale to seq_len=64, batch=4. This was a cost of the
+  from-disk logprobs API `bf16_floor.py` uses, not a phase-2a physics finding.
+  `src/weight_sync_bench/phase2/collective_logits.py` replaces that path with a `collective_rpc`
+  call that returns the raw logits tensor directly, and has been verified on the GPU box (not just
+  reasoned from source): bit-identical `[7, 151936]` float32 tensors (`torch.equal`) against the old
+  path for the same prompt, and 272.7x-932.5x faster, with the speedup growing with `seq_len`
+  because the old path's cost scaled with it and the new one's does not (full numbers in
+  `tolerance/phase2b_extraction.json`). This unblocks re-running the seq_len sweep; **the sweep
+  itself has not been re-run yet** -- what's verified so far is the extraction method (single
+  prompt, TP=1, bit-identity plus timing at seq_len in {8, 32, 128}), not the actual TP=1-vs-TP=2
+  differential floor at a larger seq_len. That remains open, and `tolerance/phase2a_bf16_floor.json`
+  (measured at seq_len=8) still stands as the recorded floor until a new sweep supersedes it.
 
 **Gate verdict: PASS on the physics.** All three break cases at 20 reps sit 40x-77x above the
 measured floor mean (1.772 / 1.570 / 2.984 against 3.898e-02) and clear the revised threshold

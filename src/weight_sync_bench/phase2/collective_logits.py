@@ -2,18 +2,29 @@
 bf16_floor.py's prompt_logprobs full-vocab extraction path. SPEC.md phase 2,
 section 2a follow-up.
 
-UNTESTED (still, as of this revision). Written on a CPU-only dev machine
-against vLLM v0.28.0 source read directly from github.com/vllm-project/vllm
-at tag v0.28.0 (citations below give exact files/line ranges as they stood at
-that tag). It has not been run against a real GPU or a real vLLM install.
-Every vLLM API call in this module is unverified by execution -- read the
-citations, do not trust this file because it reads plausibly, and smoke-test
-with tiny repetitions/batch/seq_len before trusting any number out of it,
-same discipline as bf16_floor.py.
+VERIFIED, in part, on a real GPU box (A100-SXM4-80GB, TP=1) -- see
+`tolerance/phase2b_extraction.json` for the full record. Confirmed there:
+`worker_extension_cls` injection, the `__module__` V2-runner assertion, the
+byte-buffer transport (Q7), and the `[:-1]` slice (Q6) all work as designed
+-- this path and bf16_floor.py's `prompt_logprobs=-1` path produce
+BIT-IDENTICAL `[7, 151936]` float32 tensors (`torch.equal`) for an 8-token
+prompt, and this path is 273x-933x faster, with the speedup growing with
+`seq_len` because the old path's cost scales with it and this one doesn't
+(design point 3, Q1). NOT YET VERIFIED: TP=2 (the actual differential-floor
+comparison this module exists for), `batch > 1`, and every `repetitions`
+loop in `_run_worker`/`measure_differential_floor` beyond the single-prompt
+smoke test -- those paths are still only reasoned from source, at vLLM
+v0.28.0 (citations below give exact files/line ranges as they stood at that
+tag from github.com/vllm-project/vllm). Read the citations for anything not
+covered by the smoke test above; do not trust this file because it reads
+plausibly.
 
 `bf16_floor.py` is left completely unmodified. This module is additive, so the
 two extraction paths can be run side by side on the box and compared -- both
 for correctness (do they measure the same floor?) and for wall-clock cost.
+The comparison above is that verification, for the extraction method itself;
+`measure_differential_floor`'s actual TP1-vs-TP2 numbers still need their own
+run before they can supersede `tolerance/phase2a_bf16_floor.json`.
 
 --------------------------------------------------------------------------
 HOW THIS REVISION CAME ABOUT, AND THE ONE MISTAKE BEHIND TWO OF ITS BUGS
@@ -515,16 +526,23 @@ Q7. Why can `collective_rpc` not carry a `torch.Tensor` back as a return
     non-aux buffers (serial_utils.py:414, "Clone ensures tensor is backed by
     pytorch-owned memory").
 
-    SIZE, so far unexercised: at this repo's current parameters the payload
-    is small -- ~4.9MB fp32 at `seq_len=8`, ~39MB at `seq_len=64` (one
-    request's tensor at a time, not batched, per bf16_floor.py's one-prompt-
-    at-a-time discipline). Comfortable for a single ZMQ message either way.
-    If a later sweep pushes `seq_len` far enough that a single collective_rpc
-    payload becomes unwieldy, reconsider a temp-file handoff (worker writes,
-    returns a path -- a plain `str`, trivially safe over this same
-    transport) instead of growing the in-memory byte buffer further; this is
-    the same `seq_len`-scaling boundary design point 3b already names for
-    the chunked-prefill no-op finding, and both should be re-examined
+    SIZE: exercised up to `seq_len=128` on the box
+    (`tolerance/phase2b_extraction.json`) -- the transported (post-`[:-1]`)
+    payload there is 127 * 151936 * 4 bytes =~ 77MB fp32, and it round-tripped
+    (generate() + both collective_rpc calls + reconstruction) in 0.289s. That
+    is larger than the ~39MB this repo's `seq_len=64` sweep parameter implies
+    (63 * 151936 * 4 bytes), so the size concern is measured favorably, not
+    just estimated, up to at least this point -- an ~77MB payload is not
+    where this transport starts to strain. Genuinely unexercised is whatever
+    `seq_len` a future sweep might push toward the low thousands (where
+    design point 3a's independent CHUNK_SIZE=1024 hazard also starts to
+    matter) -- payload size scales linearly with `seq_len`, so a `seq_len`
+    an order of magnitude past 128 (a several-hundred-MB message) is the
+    point to reconsider a temp-file handoff (worker writes, returns a path --
+    a plain `str`, trivially safe over this same transport) instead of
+    growing the in-memory byte buffer further; this is the same
+    `seq_len`-scaling boundary design point 3b already names for the
+    chunked-prefill no-op finding, and all three should be re-examined
     together if `seq_len` grows substantially.
 
 --------------------------------------------------------------------------
@@ -716,24 +734,19 @@ DESIGN
 --------------------------------------------------------------------------
 WHAT THIS DOES NOT ADDRESS -- flagged, not solved
 --------------------------------------------------------------------------
-- `torch.compile` / CUDA graph interaction: bf16_floor.py's LLM construction
-  already passes `enforce_eager=True`, which should mean `compute_logits` is
-  called as a plain Python method (not captured inside a compiled graph or a
-  CUDA-graph replay region) -- but this was not verified by tracing the
-  compile/capture boundary in the V2 runner, and cudagraph interaction is
-  exactly the kind of thing that silently breaks a monkeypatch. If this
-  module is adapted to run without `enforce_eager=True`, re-verify that
-  `compute_logits` is still a live Python call at the point the hook patches
-  it.
-- Monkeypatching an instance attribute (`model.compute_logits = hooked`)
-  shadows the class method via normal Python instance-`__dict__` lookup, a
-  standard technique -- but was not verified against whatever `nn.Module`
-  machinery (hooks, `__setattr__` overrides) vLLM's model base classes might
-  define that could interfere with a plain attribute assignment.
-- No timing comparison exists yet between this path and bf16_floor.py's,
-  since neither has been run to completion. That comparison is the actual
-  point of writing this as a second, side-by-side module rather than editing
-  the original.
+- `torch.compile` / CUDA graph interaction: CONFIRMED HARMLESS UNDER
+  `enforce_eager=True` -- the smoke test's bit-identical result at TP=1
+  (`tolerance/phase2b_extraction.json`) would not be possible if
+  `compute_logits` were being called inside a compiled graph or CUDA-graph
+  replay region the hook couldn't see. This confirms the eager case only;
+  if this module is ever adapted to run without `enforce_eager=True`,
+  re-verify that `compute_logits` is still a live Python call at the point
+  the hook patches it -- that combination remains unexercised.
+- Monkeypatching an instance attribute (`model.compute_logits = hooked`):
+  CONFIRMED WORKING for the same reason -- a bit-identical result means the
+  instance-`__dict__` shadowing technique correctly intercepted every real
+  call without vLLM's model base classes interfering, at least under the
+  configuration actually tested (TP=1, eager, Qwen3-0.6B, V2 runner).
 - Disabling chunked prefill and prefix caching (design point 3b) changes the
   configuration bf16_floor.py's own measurement was taken under (which runs
   with both left at their defaults, i.e. on). The two paths are therefore
@@ -1008,6 +1021,8 @@ def run_one_prompt(llm: Any, token_ids: list[int]) -> "torch.Tensor":
     row dropped, not the first, per Q6. Requires `llm` to have been
     constructed with `worker_extension_cls=WORKER_EXTENSION_QUALNAME`.
     """
+    import warnings
+
     import torch
     from vllm import SamplingParams
 
@@ -1035,7 +1050,21 @@ def run_one_prompt(llm: Any, token_ids: list[int]) -> "torch.Tensor":
         # collective_rpc cannot carry a torch.Tensor back as a return value
         # at this vLLM version (Q7) -- reconstruct from the wire triple.
         dtype_str, shape, raw_bytes = non_none[0]
-        return torch.frombuffer(raw_bytes, dtype=getattr(torch, dtype_str)).view(shape).clone()
+        # torch.frombuffer on a `bytes` object warns "the given buffer is
+        # not writable" -- expected and harmless here: `bytes` is
+        # immutable by design, .clone() (below, unconditional) copies into
+        # a fresh, pytorch-owned, writable tensor before this function
+        # returns, and nothing ever writes into the frombuffer view itself.
+        # This is the same pattern vLLM's own _decode_tensor uses for its
+        # non-aux-buffer case (serial_utils.py: "Clone ensures tensor is
+        # backed by pytorch-owned memory"). Suppressed rather than left to
+        # print on every call so it doesn't read as an unhandled issue.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message="The given buffer is not writable"
+            )
+            tensor = torch.frombuffer(raw_bytes, dtype=getattr(torch, dtype_str))
+        return tensor.view(shape).clone()
     finally:
         llm.collective_rpc("uninstall_logits_hook")
 
