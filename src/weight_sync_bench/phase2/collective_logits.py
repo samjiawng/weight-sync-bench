@@ -2,22 +2,39 @@
 bf16_floor.py's prompt_logprobs full-vocab extraction path. SPEC.md phase 2,
 section 2a follow-up.
 
-VERIFIED, in part, on a real GPU box (A100-SXM4-80GB, TP=1) -- see
-`tolerance/phase2b_extraction.json` for the full record. Confirmed there:
+VERIFIED, in part, on a real GPU box (A100-SXM4-80GB) -- see
+`tolerance/phase2b_extraction.json` for the TP=1 record. Confirmed there:
 `worker_extension_cls` injection, the `__module__` V2-runner assertion, the
 byte-buffer transport (Q7), and the `[:-1]` slice (Q6) all work as designed
 -- this path and bf16_floor.py's `prompt_logprobs=-1` path produce
 BIT-IDENTICAL `[7, 151936]` float32 tensors (`torch.equal`) for an 8-token
 prompt, and this path is 273x-933x faster, with the speedup growing with
 `seq_len` because the old path's cost scales with it and this one doesn't
-(design point 3, Q1). NOT YET VERIFIED: TP=2 (the actual differential-floor
-comparison this module exists for), `batch > 1`, and every `repetitions`
-loop in `_run_worker`/`measure_differential_floor` beyond the single-prompt
-smoke test -- those paths are still only reasoned from source, at vLLM
+(design point 3, Q1).
+
+TP=2 ALSO CONFIRMED WORKING, in the sense that the box the same session used
+(NCCL 2.29.7, two Worker processes, each with `LogitsHookWorkerExtension`
+injected, each genuinely sharding 0.57 GiB) hit exactly the failure Q3's
+one-branch version of `run_one_prompt` predicted it would if
+`current_platform.use_all_gather()` were `True` there: both ranks returned
+non-None. That confirmed the mechanism works end to end (hook installed on
+every rank, every rank's `compute_logits` call intercepted, every rank
+returned a real tensor over the wire) and located the one thing the earlier
+Q3 answer had wrong -- see Q3, revised, and the meta-note below. `run_one_prompt`
+now handles both branches, asserting bit-identity across ranks in the
+all-gather one. THAT SPECIFIC ASSERTION HAS NOT ITSELF BEEN RUN YET: the
+failing run predates this fix, so while it demonstrates both ranks produced
+*a* non-None result, it did not reach the point of comparing them --
+whether they are actually bit-identical (the assertion this revision adds)
+is the next thing to confirm on the box, not something already shown.
+
+NOT YET VERIFIED: `batch > 1`, and every `repetitions` loop in
+`_run_worker`/`measure_differential_floor` beyond the single-prompt smoke
+tests above -- those paths are still only reasoned from source, at vLLM
 v0.28.0 (citations below give exact files/line ranges as they stood at that
 tag from github.com/vllm-project/vllm). Read the citations for anything not
-covered by the smoke test above; do not trust this file because it reads
-plausibly.
+covered by a verification note above; do not trust this file because it
+reads plausibly.
 
 `bf16_floor.py` is left completely unmodified. This module is additive, so the
 two extraction paths can be run side by side on the box and compared -- both
@@ -27,7 +44,7 @@ The comparison above is that verification, for the extraction method itself;
 run before they can supersede `tolerance/phase2a_bf16_floor.json`.
 
 --------------------------------------------------------------------------
-HOW THIS REVISION CAME ABOUT, AND THE ONE MISTAKE BEHIND TWO OF ITS BUGS
+HOW THIS REVISION CAME ABOUT, AND THE ONE MISTAKE BEHIND MOST OF ITS BUGS
 --------------------------------------------------------------------------
 The first version of this module failed on the box in two independent ways:
 `collective_rpc` rejected a raw function (TypeError, not serializable), and
@@ -52,6 +69,16 @@ unconditionally regardless of which runner was actually active, for the wrong
 reason. Neither bug was caught by re-reading harder; both were caught by the
 box actually running the code. A source citation that stops before a
 function's return statement is not a citation of what the function does.
+
+The same shape of mistake recurred twice more in later revisions -- see Q6
+(reasoning by analogy from V1's structure instead of tracing V2's actual
+call sequence to where a shape is decided) and Q3 (treating a docstring
+comment about why a code branch exists as a statement about which platform
+takes it, instead of checking whether any platform subclass actually
+overrides the always-`True` default). All four bugs share the same
+corrective: read to where a function actually returns its value, or check
+whether a claimed override actually exists, rather than stopping at a
+plausible-sounding intermediate point.
 
 --------------------------------------------------------------------------
 PROBLEM
@@ -281,10 +308,16 @@ Q2. `collective_rpc` mechanics: what actually failed, and the supported fix.
 Q3. Under TP=2, does the worker already gather logits, or does each rank hold
     a vocab slice? all-gather-on-worker vs concatenate-on-driver?
 
-    Already gathered, INSIDE `compute_logits` itself, and it is a gather to
-    one rank, not an all-gather. This is `LogitsProcessor` code, unrelated to
-    the model runner, so V1/V2 doesn't change it. `vllm/model_executor/layers/
-    logits_processor.py:118-129` (`LogitsProcessor._gather_logits`):
+    Already gathered, INSIDE `compute_logits` itself -- confirmed. Which of
+    the two gather forms, though, CORRECTED IN THIS REVISION: an earlier
+    version of this answer claimed `current_platform.use_all_gather()` was
+    `False` on CUDA, based on a docstring comment about why the all-gather
+    branch exists (TPU strict-SPMD requirements) mistaken for a statement
+    about which platforms actually take it. Running TP=2 on the box raised
+    exactly the error the earlier, single-branch version of `run_one_prompt`
+    predicted it would if this were wrong: both ranks returned non-None.
+    `vllm/model_executor/layers/logits_processor.py:118-129`
+    (`LogitsProcessor._gather_logits`):
 
         if self.use_all_gather:
             logits = tensor_model_parallel_all_gather(logits)
@@ -292,19 +325,43 @@ Q3. Under TP=2, does the worker already gather logits, or does each rank hold
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
 
-    `current_platform.use_all_gather()` is False on CUDA (the comment says
-    the all-gather branch exists for platforms like TPU that require strict
-    SPMD). So on the target platform, every call to `compute_logits` already
-    performs a gather-to-rank-0 as part of computing that step's logits --
-    this is not something the design needs to add.
+    `current_platform.use_all_gather()` is defined once, on the base
+    `Platform` class (`vllm/platforms/interface.py:1101-1106`), and returns
+    `True` unconditionally:
 
-    DECISION: neither all-gather-on-worker nor concatenate-on-driver, in the
-    sense the question poses them -- there is nothing to gather or
-    concatenate ourselves. The hook simply captures whatever `compute_logits`
-    returns on each rank: a real tensor on rank 0, `None` on every other rank,
-    for free, as a consequence of vLLM's own internal gather. The retrieval
-    side (`retrieve_and_clear_logits`) picks the one non-None result out of
-    the list `collective_rpc` returns.
+        @classmethod
+        def use_all_gather(cls) -> bool:
+            # "Whether to use allgather in LogitsProcessor to gather the logits."
+            return True
+
+    Every platform subclass that exists at v0.28.0 -- `CpuPlatform`,
+    `CudaPlatformBase`/`NvmlCudaPlatform`, `RocmPlatform`, `TpuPlatform`,
+    `XPUPlatform`, `ZenCpuPlatform` -- was checked, and NONE override it.
+    **This is neither platform-dependent nor config-dependent: it is a
+    hardcoded default with zero live overrides anywhere in vLLM at this
+    version.** `tensor_model_parallel_gather`-to-one-rank is dead code today
+    on every platform vLLM ships, not a CUDA-specific alternative to
+    all-gather. None of the box's other details (NCCL version, device
+    capability, SymmMemCommunicator availability, CUSTOM/PYNCCL allreduce
+    backend selection) bear on this -- those govern a different collective
+    (allreduce) elsewhere; this branch is decided purely by the always-`True`
+    classmethod above.
+
+    DECISION, REVISED: since the fix cannot assume either branch is dead
+    (nothing rules out a future platform overriding it, or vLLM changing the
+    default), `run_one_prompt` handles both. All-gather is the branch this
+    box actually took: every rank held an identical, fully-gathered tensor,
+    so the hook captured a non-None result on every rank (both TP=2 workers
+    in this run) rather than only rank 0. `run_one_prompt` reconstructs
+    every rank's tensor and asserts them BIT-IDENTICAL (`torch.equal`, every
+    pair) before using rank 0's -- a free correctness check on vLLM's own
+    all-gather that comes along for the ride: if the ranks ever disagreed
+    here, that would mean the gather itself is wrong, which is exactly the
+    class of bug this whole harness exists to catch, so a mismatch raises
+    (naming the worst pairwise max-abs-diff) rather than silently trusting
+    rank 0. The gather-to-rank-0 branch (exactly one non-None) is kept and
+    still used for TP=1, and would still work correctly if some future
+    platform or vLLM version ever took it for TP>1.
 
 Q4. How do return values cross the boundary? Must tensors move to CPU first?
 
@@ -1015,14 +1072,52 @@ class LogitsHookWorkerExtension:
 # --------------------------------------------------------------------------- #
 
 
+def _reconstruct_tensor(wire_triple: tuple[str, list[int], bytes]) -> "torch.Tensor":
+    """Reverses retrieve_and_clear_logits's wire encoding (Q7):
+    (dtype_str, shape_list, raw_bytes) -> torch.Tensor.
+    """
+    import warnings
+
+    import torch
+
+    dtype_str, shape, raw_bytes = wire_triple
+    # torch.frombuffer on a `bytes` object warns "the given buffer is not
+    # writable" -- expected and harmless here: `bytes` is immutable by
+    # design, .clone() (below, unconditional) copies into a fresh,
+    # pytorch-owned, writable tensor before this function returns, and
+    # nothing ever writes into the frombuffer view itself. This is the same
+    # pattern vLLM's own _decode_tensor uses for its non-aux-buffer case
+    # (serial_utils.py: "Clone ensures tensor is backed by pytorch-owned
+    # memory"). Suppressed rather than left to print on every call so it
+    # doesn't read as an unhandled issue.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        tensor = torch.frombuffer(raw_bytes, dtype=getattr(torch, dtype_str))
+    return tensor.view(shape).clone()
+
+
 def run_one_prompt(llm: Any, token_ids: list[int]) -> "torch.Tensor":
     """Runs one teacher-forced prompt through `llm` and returns a
     [len(token_ids) - 1, vocab] float32 CPU tensor of raw logits -- the last
     row dropped, not the first, per Q6. Requires `llm` to have been
     constructed with `worker_extension_cls=WORKER_EXTENSION_QUALNAME`.
-    """
-    import warnings
 
+    Handles BOTH of Q3's branches (`current_platform.use_all_gather()` is a
+    hardcoded classmethod with no live override on any current vLLM
+    platform -- see Q3's revised answer -- so which branch a given box takes
+    is not something this function can assume in advance):
+      - Exactly one rank returns non-None (gather-to-rank-0): use it.
+      - Every rank returns non-None (all-gather): every rank's captured
+        tensor is asserted BIT-IDENTICAL (torch.equal, every pair) before
+        any of them is used. This is a free correctness check on vLLM's own
+        all-gather, not a formality -- ranks disagreeing after an
+        all-gather would mean the gather itself is wrong, which is exactly
+        the class of bug this whole harness exists to catch, so a mismatch
+        raises (naming the worst pairwise max-abs-diff) rather than
+        silently trusting rank 0.
+      - Any other count (some but not all ranks non-None): always an error;
+        neither branch's invariant holds.
+    """
     import torch
     from vllm import SamplingParams
 
@@ -1039,32 +1134,37 @@ def run_one_prompt(llm: Any, token_ids: list[int]) -> "torch.Tensor":
             "retrieve_and_clear_logits", args=(expected_num_tokens,)
         )
         non_none = [r for r in results if r is not None]
-        if len(non_none) != 1:
-            raise RuntimeError(
-                f"expected exactly one rank to return captured logits (Q3: "
-                f"gather-to-rank-0), got {len(non_none)} of {len(results)} "
-                "ranks -- current_platform.use_all_gather() may be True on "
-                "this box (see the module docstring's Q3 answer), which "
-                "would mean every rank returns the same tensor instead."
-            )
-        # collective_rpc cannot carry a torch.Tensor back as a return value
-        # at this vLLM version (Q7) -- reconstruct from the wire triple.
-        dtype_str, shape, raw_bytes = non_none[0]
-        # torch.frombuffer on a `bytes` object warns "the given buffer is
-        # not writable" -- expected and harmless here: `bytes` is
-        # immutable by design, .clone() (below, unconditional) copies into
-        # a fresh, pytorch-owned, writable tensor before this function
-        # returns, and nothing ever writes into the frombuffer view itself.
-        # This is the same pattern vLLM's own _decode_tensor uses for its
-        # non-aux-buffer case (serial_utils.py: "Clone ensures tensor is
-        # backed by pytorch-owned memory"). Suppressed rather than left to
-        # print on every call so it doesn't read as an unhandled issue.
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore", message="The given buffer is not writable"
-            )
-            tensor = torch.frombuffer(raw_bytes, dtype=getattr(torch, dtype_str))
-        return tensor.view(shape).clone()
+
+        if len(non_none) == 1:
+            # Gather-to-rank-0 branch. Also covers TP=1 (one rank total,
+            # trivially "exactly one"), where there is nothing to compare.
+            return _reconstruct_tensor(non_none[0])
+
+        if len(non_none) == len(results) and len(results) > 1:
+            # All-gather branch (Q3, revised: the branch actually observed
+            # on this box, since current_platform.use_all_gather() has no
+            # live False override anywhere in vLLM at this version).
+            tensors = [_reconstruct_tensor(wire) for wire in non_none]
+            for rank, other in enumerate(tensors[1:], start=1):
+                if not torch.equal(tensors[0], other):
+                    max_diff = (tensors[0] - other).abs().max().item()
+                    raise RuntimeError(
+                        f"all-gather branch (Q3): rank 0's and rank {rank}'s "
+                        f"captured logits differ (max abs diff {max_diff:.3e}). "
+                        "Ranks disagreeing after an all-gather means the "
+                        "gather itself is wrong, not a rank-selection "
+                        "ambiguity -- raised rather than silently using "
+                        "rank 0's value, since that is exactly the class of "
+                        "bug this harness exists to catch."
+                    )
+            return tensors[0]
+
+        raise RuntimeError(
+            f"expected either exactly one rank (gather-to-rank-0) or every "
+            f"rank (all-gather) to return captured logits (Q3), got "
+            f"{len(non_none)} of {len(results)} ranks -- neither branch's "
+            "invariant holds."
+        )
     finally:
         llm.collective_rpc("uninstall_logits_hook")
 
