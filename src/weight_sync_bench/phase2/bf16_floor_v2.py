@@ -1,19 +1,27 @@
 """bf16 floor measurement, ported onto collective_logits.run_one_prompt for
 extraction. SPEC.md phase 2, section 2a, extraction-path revision.
 
-UNTESTED AS A WHOLE, though built entirely from verified and unchanged parts.
-What IS verified on the real GPU box: the extraction primitive this module
-is built on, `collective_logits.run_one_prompt` -- bit-identical output
-against `bf16_floor.py`'s `prompt_logprobs=-1` path, 272.7x-932.5x faster
-(`tolerance/phase2b_extraction.json`). What is NOT verified is the
-COMPOSITION built on top of that primitive in this file: the repetitions
-loop, the TP=2 leg, break-case checkpoint loading, and the gate-decision
-assembly, run end to end. That composition is new relative to what was
-executed on the box, even though every individual piece it's made of is
-either unchanged (imported directly from `bf16_floor.py`, not re-derived)
-or already verified (`run_one_prompt` itself). Smoke-test with
-`--repetitions 1 --batch 1 --seq-len 8` before trusting a full run, same
-discipline as both modules this one is built from.
+VERIFIED END TO END on the real GPU box -- see `tolerance/phase2a_bf16_floor_v2.json`
+for the full record. Three runs: a smoke test (`--repetitions 1 --batch 1
+--seq-len 8`, mean_deviation 3.038e-02), a reproduction of
+`tolerance/phase2a_bf16_floor.json`'s exact recorded configuration
+(`--repetitions 20 --batch 2 --seq-len 8`), and a seq_len sweep
+(`--repetitions 20 --batch 4 --sweep-seq-len 8,32,128,512`). The
+reproduction is the load-bearing result: mean_deviation 3.898e-02,
+max_deviation 8.125e-01 (104.00 ULP), and break-case means 1.772 / 1.570 /
+2.984 -- IDENTICAL to `tolerance/phase2a_bf16_floor.json`'s recorded floor
+to four significant figures on every one of those six numbers, with the
+full repetitions loop, both TP legs, and all three break-case checkpoint
+loads exercised, not just the single-prompt primitive. That reproduction is
+itself the confirmation that TP=2's all-gather bit-identity assertion in
+`collective_logits.run_one_prompt` works correctly: it fires on every TP=2
+call this run made (the floor's TP=2 leg and all three break-case loads),
+and a mismatch there raises immediately by design, so completing cleanly
+with matching numbers means it passed every time. The sweep additionally
+establishes that the floor's mean is invariant across a 64x seq_len range
+(8 to 512) -- see `tolerance/phase2a_bf16_floor_v2.json`'s
+`seq_len_dependence` block, which supersedes the seq_len-dependence caveat
+`tolerance/phase2a_bf16_floor.json` previously carried as open.
 
 `bf16_floor.py` is left completely unmodified and remains runnable as the
 reference implementation -- this module is additive, writes to a different
@@ -102,13 +110,20 @@ SEQ_LEN SWEEP
 the full floor+break-case+gate pipeline once per seq_len in the list, at
 fixed `--repetitions`/`--batch`, and writes one combined report. This is the
 question the killed `--repetitions 20 --batch 4 --seq-len 64` run
-(`tolerance/phase2a_bf16_floor.json`'s own "SEQ_LEN DEPENDENCE IS UNTESTED"
-note) was trying to answer, made affordable by the extraction speedup: the
-old path's ~932x-slower-at-seq_len=128 cost would have made a four-point
-sweep prohibitive; the new path's near-fixed cost does not scale with it.
-Cost and wall-clock duration of an actual sweep run were not verified here
--- no GPU on this machine -- only that the code constructs and writes a
-sensible report shape.
+(`tolerance/phase2a_bf16_floor.json`'s own former "SEQ_LEN DEPENDENCE IS
+UNTESTED" note, since retired) was trying to answer, made affordable by the
+extraction speedup: the old path's ~932x-slower-at-seq_len=128 cost would
+have made a four-point sweep prohibitive; the new path's near-fixed cost
+does not scale with it. RUN ON THE BOX: `--repetitions 20 --batch 4
+--sweep-seq-len 8,32,128,512` completed and passed the gate at every point
+-- see `tolerance/phase2a_bf16_floor_v2.json`'s `sweep` and
+`seq_len_dependence` blocks for the full numbers, including that the mean is
+measured invariant across the whole 64x range (design's predicted
+behavior). Exact per-seq_len wall-clock timing for the sweep itself was not
+captured in what was reported into this session, so is not recorded here,
+though it plainly completed in a practical amount of time (unlike the
+killed old-path run at a single seq_len this sweep's largest point exceeds
+by 8x).
 """
 
 from __future__ import annotations
@@ -157,17 +172,26 @@ SUPERSEDES_NOTE = (
     "see tolerance/phase2b_extraction.json for the bit-identity and timing "
     "verification this port relies on. Cache flags: enable_chunked_prefill=False "
     "and enable_prefix_caching=False are now set explicitly (bf16_floor.py "
-    "leaves both at vLLM's defaults, i.e. on); this resolves "
+    "leaves both at vLLM's defaults, i.e. on); this resolved "
     "tolerance/phase2a_bf16_floor.json's own recorded caveat that repetition "
     "independence under prefix caching was unverified there -- in this "
-    "artifact independence is guaranteed by construction, not merely assumed. "
-    "SAFETY_FACTOR, GATE_MARGIN, the mean-as-primary-statistic rule, the "
-    "differential TP1-vs-TP2 design, and every break-case injection are "
-    "unchanged -- imported directly from bf16_floor.py, not re-derived. This "
-    "artifact's own measurement composition (the full repetitions/TP2/"
-    "break-case/gate pipeline run end to end with the new extraction path) "
-    "was NOT verified by execution when this module was written -- only the "
-    "underlying run_one_prompt primitive was (tolerance/phase2b_extraction.json)."
+    "artifact independence is guaranteed by construction, not merely assumed, "
+    "AND a same-configuration reproduction run (tolerance/phase2a_bf16_floor_v2.json's "
+    "'reproduction' block) confirmed the two are numerically identical to four "
+    "significant figures, so caching being on during the original measurement "
+    "demonstrably did not affect the floor. SAFETY_FACTOR, GATE_MARGIN, the "
+    "mean-as-primary-statistic rule, the differential TP1-vs-TP2 design, and "
+    "every break-case injection are unchanged -- imported directly from "
+    "bf16_floor.py, not re-derived. This module's own measurement composition "
+    "(the full repetitions/TP2/break-case/gate pipeline run end to end with "
+    "the new extraction path) has been verified by execution: a reproduction "
+    "run reproduced tolerance/phase2a_bf16_floor.json's recorded floor and "
+    "break-case means to four significant figures, and a seq_len sweep "
+    "(8/32/128/512) passed the gate at every point -- see "
+    "tolerance/phase2a_bf16_floor_v2.json. A run at OTHER parameters than "
+    "those two (a different model, dtype, or far outside the swept seq_len "
+    "range) is not covered by that verification and should be treated with "
+    "the same caution as any first run."
 )
 
 
@@ -179,6 +203,7 @@ def _spawn_worker(
     batch: int,
     seq_len: int,
     out_path: Path,
+    seed_base: int = 0,
 ) -> None:
     subprocess.run(
         [
@@ -198,18 +223,23 @@ def _spawn_worker(
             str(seq_len),
             "--out",
             str(out_path),
+            "--seed-base",
+            str(seed_base),
         ],
         check=True,
     )
 
 
 def measure_differential_floor(
-    repetitions: int, batch: int, seq_len: int, python: str = sys.executable
+    repetitions: int, batch: int, seq_len: int, python: str = sys.executable, seed_base: int = 0
 ) -> dict[str, Any]:
     """Same as bf16_floor.measure_differential_floor: downloads the real
     checkpoint once, runs each TP degree as its own subprocess (this
     module's `--worker`, which is `collective_logits._run_worker` --
-    unchanged), and diffs the two saved tensor sets.
+    unchanged), and diffs the two saved tensor sets. `seed_base` is forwarded
+    to both TP legs unchanged -- see `collective_logits._run_worker`'s
+    docstring for what it shifts and why `seed_base=0` (the default)
+    reproduces every artifact recorded before this parameter existed.
     """
     import tempfile
 
@@ -223,7 +253,7 @@ def measure_differential_floor(
         tmp = Path(tmp)
         tp1_path, tp2_path = tmp / "tp1.pt", tmp / "tp2.pt"
         for tp, out_path in ((1, tp1_path), (2, tp2_path)):
-            _spawn_worker(python, checkpoint_dir, tp, repetitions, batch, seq_len, out_path)
+            _spawn_worker(python, checkpoint_dir, tp, repetitions, batch, seq_len, out_path, seed_base)
 
         tp1_reps = torch.load(tp1_path)
         tp2_reps = torch.load(tp2_path)
@@ -260,10 +290,16 @@ def run_break_case(
     batch: int,
     seq_len: int,
     python: str = sys.executable,
+    seed_base: int = 0,
 ) -> dict[str, Any]:
     """Same as bf16_floor.run_break_case: corrupts a fresh copy of the
     checkpoint (corrupt_checkpoint, unchanged, imported), loads it at TP=2
     through this module's worker, and diffs against the TP1 reference.
+    `seed_base` must match the value `tp1_reference` was generated with, or
+    this is comparing draws from different tokens/model-seed state rather
+    than the same one under a genuine layout corruption -- `_measure_one_config`
+    passes the same `seed_base` to both, so this only matters if calling
+    `run_break_case` directly.
     """
     import tempfile
 
@@ -274,7 +310,7 @@ def run_break_case(
         corrupt_checkpoint(checkpoint_dir, corrupted_dir, case)
 
         out_path = Path(tmp) / f"{case}.pt"
-        _spawn_worker(python, str(corrupted_dir), 2, repetitions, batch, seq_len, out_path)
+        _spawn_worker(python, str(corrupted_dir), 2, repetitions, batch, seq_len, out_path, seed_base)
         broken_reps = torch.load(out_path)
 
     cells = []
@@ -292,23 +328,32 @@ def run_break_case(
 
 
 def _measure_one_config(
-    repetitions: int, batch: int, seq_len: int, python: str = sys.executable
+    repetitions: int, batch: int, seq_len: int, python: str = sys.executable, seed_base: int = 0
 ) -> dict[str, Any]:
     """Floor + all break cases + gate decision, for one (repetitions, batch,
     seq_len). Factored out so both the single-config CLI path and
-    --sweep-seq-len share it.
+    --sweep-seq-len share it. `seed_base=0` reproduces every artifact
+    recorded before this parameter existed -- see
+    `collective_logits._run_worker`'s docstring.
     """
-    floor = measure_differential_floor(repetitions, batch, seq_len, python)
+    floor = measure_differential_floor(repetitions, batch, seq_len, python, seed_base)
     tp1_reference = floor.pop("tp1_reference")
 
     break_results = [
-        run_break_case(case, floor["checkpoint_dir"], tp1_reference, repetitions, batch, seq_len, python)
+        run_break_case(
+            case, floor["checkpoint_dir"], tp1_reference, repetitions, batch, seq_len, python, seed_base
+        )
         for case in BREAK_CASES
     ]
     gate = gate_decision(floor, break_results)
 
     return {
-        "measurement": {"repetitions": repetitions, "batch": batch, "seq_len": seq_len},
+        "measurement": {
+            "repetitions": repetitions,
+            "batch": batch,
+            "seq_len": seq_len,
+            "seed_base": seed_base,
+        },
         "floor": floor,
         "break_cases": break_results,
         "gate": gate,
@@ -339,17 +384,34 @@ def main() -> None:
             "combined report -- see the module docstring's SEQ_LEN SWEEP section."
         ),
     )
+    parser.add_argument(
+        "--seed-base",
+        type=int,
+        default=0,
+        help=(
+            "Shifts both seed axes for a discriminating rerun: token seed "
+            "becomes 10_000 + seed_base + rep, model seed (torch.manual_seed, "
+            "collective_logits._run_worker) becomes seed_base + rep. Default 0 "
+            "reproduces every artifact recorded before this flag existed -- see "
+            "collective_logits._run_worker's docstring for exactly what this "
+            "does and does not change under this harness's greedy-decoding "
+            "configuration."
+        ),
+    )
     args = parser.parse_args()
 
     if args.worker:
         assert args.model_dir and args.out
-        _run_worker(args.model_dir, args.tp, args.repetitions, args.batch, args.seq_len, args.out)
+        _run_worker(
+            args.model_dir, args.tp, args.repetitions, args.batch, args.seq_len, args.out, args.seed_base
+        )
         return
 
     if args.sweep_seq_len:
         seq_lens = [int(s) for s in args.sweep_seq_len.split(",")]
         results = [
-            _measure_one_config(args.repetitions, args.batch, seq_len) for seq_len in seq_lens
+            _measure_one_config(args.repetitions, args.batch, seq_len, seed_base=args.seed_base)
+            for seq_len in seq_lens
         ]
         report = {
             "phase": "2a",
@@ -360,6 +422,7 @@ def main() -> None:
                 "repetitions": args.repetitions,
                 "batch": args.batch,
                 "seq_lens": seq_lens,
+                "seed_base": args.seed_base,
             },
             "results": results,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -376,7 +439,7 @@ def main() -> None:
             )
         return
 
-    result = _measure_one_config(args.repetitions, args.batch, args.seq_len)
+    result = _measure_one_config(args.repetitions, args.batch, args.seq_len, seed_base=args.seed_base)
     report = {
         "phase": "2a",
         "supersedes": SUPERSEDES_NOTE,

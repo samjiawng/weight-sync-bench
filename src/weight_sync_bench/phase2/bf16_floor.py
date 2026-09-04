@@ -232,9 +232,39 @@ def environment() -> dict[str, Any]:
             info["gpu_count"] = torch.cuda.device_count()
             info["gpu_name"] = torch.cuda.get_device_name(0)
             info["cuda_version"] = torch.version.cuda
-            info["driver_version"] = torch.cuda.driver_version if hasattr(
-                torch.cuda, "driver_version"
-            ) else None
+            # NOT torch.cuda.driver_version. The previous line here was
+            # `torch.cuda.driver_version if hasattr(torch.cuda,
+            # "driver_version") else None` -- a hasattr guard around an
+            # attribute that does not exist on torch 2.13.0+cu130, so it
+            # silently fell through to None on every real run. That is the
+            # SAME failure class as collective_logits.py's old `shape[0] >=
+            # expected_min_positions` check (fixed to an exact `==`): a loose
+            # guard around instrumentation that degrades silently instead of
+            # raising when its assumption is wrong, so a missing value reads
+            # as "not applicable here" instead of "this code is broken."
+            # Concretely: every phase-2 artifact through
+            # tolerance/phase2a_bf16_floor_v2.json recorded driver_version as
+            # null while the box was reporting 580.126.16 throughout, and
+            # nothing in this pipeline ever surfaced the mismatch -- it took
+            # a human reading the artifact next to the box's own output to
+            # notice. The NVIDIA driver version is a system-level property
+            # nvidia-smi reports, not something torch's Python API exposes
+            # directly, so there was never a torch attribute to guard in the
+            # first place.
+            info["driver_version"] = None
+            try:
+                out = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if out.returncode == 0:
+                    lines = [line.strip() for line in out.stdout.splitlines() if line.strip()]
+                    if lines:
+                        info["driver_version"] = lines[0]
+            except (OSError, subprocess.SubprocessError):
+                pass
     except ImportError:
         pass
     try:
@@ -278,8 +308,18 @@ def environment() -> dict[str, Any]:
 
 
 def _seeded_token_batches(
-    repetitions: int, batch: int, seq_len: int, vocab: int
+    repetitions: int, batch: int, seq_len: int, vocab: int, seed_base: int = 0
 ) -> list["torch.Tensor"]:  # noqa: F821 -- torch imported lazily by caller
+    """Token seed for repetition `rep` is `10_000 + seed_base + rep`. `seed_base`
+    defaults to 0, so the default call (no `seed_base` passed) is byte-for-byte
+    the same as before this parameter existed -- every artifact recorded under
+    the old, unparameterized version of this function remains reproducible by
+    its own stated command. See `--seed-base` (weight_sync_bench.phase2.collective_logits._run_worker)
+    for why a caller would ever pass a nonzero value: to draw a genuinely
+    different sample (different tokens, different model-seed state) for a
+    discriminating rerun, without disturbing what a bare rerun at the default
+    reproduces.
+    """
     import torch
 
     return [
@@ -287,7 +327,7 @@ def _seeded_token_batches(
             0,
             vocab,
             (batch, seq_len),
-            generator=torch.Generator().manual_seed(10_000 + rep),
+            generator=torch.Generator().manual_seed(10_000 + seed_base + rep),
         )
         for rep in range(repetitions)
     ]

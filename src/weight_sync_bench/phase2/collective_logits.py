@@ -12,36 +12,40 @@ prompt, and this path is 273x-933x faster, with the speedup growing with
 `seq_len` because the old path's cost scales with it and this one doesn't
 (design point 3, Q1).
 
-TP=2 ALSO CONFIRMED WORKING, in the sense that the box the same session used
-(NCCL 2.29.7, two Worker processes, each with `LogitsHookWorkerExtension`
+TP=2, THE ALL-GATHER BIT-IDENTITY ASSERTION, `batch > 1`, AND THE FULL
+`repetitions` LOOP ARE ALL NOW CONFIRMED WORKING TOO, via
+`bf16_floor_v2.py` (see its own docstring and
+`tolerance/phase2a_bf16_floor_v2.json`). TP=2 first surfaced a real gap: the
+box (NCCL 2.29.7, two Worker processes, each with `LogitsHookWorkerExtension`
 injected, each genuinely sharding 0.57 GiB) hit exactly the failure Q3's
 one-branch version of `run_one_prompt` predicted it would if
-`current_platform.use_all_gather()` were `True` there: both ranks returned
-non-None. That confirmed the mechanism works end to end (hook installed on
-every rank, every rank's `compute_logits` call intercepted, every rank
-returned a real tensor over the wire) and located the one thing the earlier
-Q3 answer had wrong -- see Q3, revised, and the meta-note below. `run_one_prompt`
-now handles both branches, asserting bit-identity across ranks in the
-all-gather one. THAT SPECIFIC ASSERTION HAS NOT ITSELF BEEN RUN YET: the
-failing run predates this fix, so while it demonstrates both ranks produced
-*a* non-None result, it did not reach the point of comparing them --
-whether they are actually bit-identical (the assertion this revision adds)
-is the next thing to confirm on the box, not something already shown.
-
-NOT YET VERIFIED: `batch > 1`, and every `repetitions` loop in
-`_run_worker`/`measure_differential_floor` beyond the single-prompt smoke
-tests above -- those paths are still only reasoned from source, at vLLM
-v0.28.0 (citations below give exact files/line ranges as they stood at that
-tag from github.com/vllm-project/vllm). Read the citations for anything not
-covered by a verification note above; do not trust this file because it
-reads plausibly.
+`current_platform.use_all_gather()` were `True` there -- both ranks returned
+non-None, and the earlier strict one-rank check raised. That located the one
+thing the earlier Q3 answer had wrong (see Q3, revised, and the meta-note
+below); `run_one_prompt` was then changed to handle both branches, asserting
+bit-identity across ranks in the all-gather one. A LATER run --
+`bf16_floor_v2.py`'s full reproduction of `tolerance/phase2a_bf16_floor.json`'s
+run20_folded_in configuration (repetitions=20, batch=2, seq_len=8, TP=1 and
+TP=2 legs, all three break-case checkpoints each loaded at TP=2) plus a
+seq_len sweep (repetitions=20, batch=4, seq_len in {8, 32, 128, 512}) and a
+smoke run (repetitions=1, batch=1) -- completed without the bit-identity
+assertion ever firing, across every one of those TP=2 calls. Since a mismatch
+there raises immediately (by design), every one of those runs completing and
+producing sensible, `bf16_floor.py`-matching numbers IS the confirmation that
+assertion works and consistently passes on this box, not merely that it
+exists. That same set of runs is also what confirms `batch > 1` and the
+`repetitions` loop: `bf16_floor_v2.py` calls this module's `_run_worker` at
+`batch` up to 4 and `repetitions=20` throughout.
 
 `bf16_floor.py` is left completely unmodified. This module is additive, so the
 two extraction paths can be run side by side on the box and compared -- both
 for correctness (do they measure the same floor?) and for wall-clock cost.
 The comparison above is that verification, for the extraction method itself;
-`measure_differential_floor`'s actual TP1-vs-TP2 numbers still need their own
-run before they can supersede `tolerance/phase2a_bf16_floor.json`.
+`bf16_floor_v2.py`'s reproduction and sweep (`tolerance/phase2a_bf16_floor_v2.json`)
+are that comparison run end to end, and its numbers now supersede
+`tolerance/phase2a_bf16_floor.json` on extraction path and cache flags while
+matching it on every measured quantity -- see that artifact's `supersedes`
+field for exactly what changed and what didn't.
 
 --------------------------------------------------------------------------
 HOW THIS REVISION CAME ABOUT, AND THE ONE MISTAKE BEHIND MOST OF ITS BUGS
@@ -70,15 +74,35 @@ reason. Neither bug was caught by re-reading harder; both were caught by the
 box actually running the code. A source citation that stops before a
 function's return statement is not a citation of what the function does.
 
-The same shape of mistake recurred twice more in later revisions -- see Q6
-(reasoning by analogy from V1's structure instead of tracing V2's actual
-call sequence to where a shape is decided) and Q3 (treating a docstring
-comment about why a code branch exists as a statement about which platform
-takes it, instead of checking whether any platform subclass actually
-overrides the always-`True` default). All four bugs share the same
-corrective: read to where a function actually returns its value, or check
-whether a claimed override actually exists, rather than stopping at a
-plausible-sounding intermediate point.
+The same shape of mistake recurred three more times in later revisions -- see
+Q6 (reasoning by analogy from V1's structure instead of tracing V2's actual
+call sequence to where a shape is decided), Q3 (treating a docstring comment
+about why a code branch exists as a statement about which platform takes it,
+instead of checking whether any platform subclass actually overrides the
+always-`True` default), and a fifth instance in `_run_worker`'s own
+docstring above: an earlier revision claimed the per-repetition
+`torch.manual_seed(seed_base + rep)` call ran "before that repetition's
+prompts run," when `_seeded_token_batches` draws every repetition's tokens
+up front, in one call, before the loop containing `torch.manual_seed` ever
+starts -- so the seed call could not have preceded any prompt's draw, only
+its later execution through the model. This fifth instance differs from the
+first four in a way worth naming: the first four were all wrong claims
+about vLLM's source; this one was a wrong claim about THIS FILE's OWN CODE,
+sitting eight lines above the very code it mischaracterized, trivially
+checkable by reading the function body immediately below the docstring
+making the claim. It survived anyway, because it described what the code
+would look like if written the more obvious way -- draw this repetition's
+tokens, then seed, then run, interleaved -- rather than the way it was
+actually structured, generate every repetition's tokens in one batched call
+first, then loop. A claim that matches the "natural" shape of a design is
+not thereby a claim about the actual code, and rereading the docstring
+without rereading the function it describes does not catch the gap.
+All five bugs share the same corrective: read to where a function actually
+returns its value, check whether a claimed override actually exists, or
+check the order operations actually run in against the order a docstring
+claims -- rather than stopping at a plausible-sounding intermediate point,
+or trusting that a description matches the code just because it sounds like
+how the code would obviously be written.
 
 --------------------------------------------------------------------------
 PROBLEM
@@ -583,24 +607,31 @@ Q7. Why can `collective_rpc` not carry a `torch.Tensor` back as a return
     non-aux buffers (serial_utils.py:414, "Clone ensures tensor is backed by
     pytorch-owned memory").
 
-    SIZE: exercised up to `seq_len=128` on the box
-    (`tolerance/phase2b_extraction.json`) -- the transported (post-`[:-1]`)
-    payload there is 127 * 151936 * 4 bytes =~ 77MB fp32, and it round-tripped
-    (generate() + both collective_rpc calls + reconstruction) in 0.289s. That
-    is larger than the ~39MB this repo's `seq_len=64` sweep parameter implies
-    (63 * 151936 * 4 bytes), so the size concern is measured favorably, not
-    just estimated, up to at least this point -- an ~77MB payload is not
-    where this transport starts to strain. Genuinely unexercised is whatever
-    `seq_len` a future sweep might push toward the low thousands (where
-    design point 3a's independent CHUNK_SIZE=1024 hazard also starts to
-    matter) -- payload size scales linearly with `seq_len`, so a `seq_len`
-    an order of magnitude past 128 (a several-hundred-MB message) is the
-    point to reconsider a temp-file handoff (worker writes, returns a path --
-    a plain `str`, trivially safe over this same transport) instead of
-    growing the in-memory byte buffer further; this is the same
-    `seq_len`-scaling boundary design point 3b already names for the
-    chunked-prefill no-op finding, and all three should be re-examined
-    together if `seq_len` grows substantially.
+    SIZE: UPDATED, exercised much further than the previous ~77MB figure.
+    `tolerance/phase2a_bf16_floor_v2.json`'s seq_len sweep reached
+    `seq_len=512` (`--sweep-seq-len 8,32,128,512`) without failure -- a
+    single reconstructed tensor there is `511 * 151936 * 4 bytes =~ 310MB`
+    fp32, and since TP=2's all-gather branch is confirmed active on this
+    box (Q3, revised), `retrieve_and_clear_logits`'s `collective_rpc` call
+    actually carries one such tensor back from EACH rank, combining to
+    roughly 620MB for that one call. The box reported moving roughly 1.2GB
+    per call at this seq_len -- about 2x the calculated combined-tensor
+    figure, not exactly reconciled (possibly encode/decode/framing overhead
+    the raw tensor arithmetic doesn't capture), recorded as reported rather
+    than forced to match. Either way, the transport handled a payload at
+    least an order of magnitude past the previous ~77MB-at-seq_len=128
+    figure with no failure -- see
+    `tolerance/phase2a_bf16_floor_v2.json`'s `transport_size` block for the
+    full accounting. Genuinely unexercised is whatever `seq_len` a future
+    sweep might push toward the low thousands (where design point 3a's
+    independent CHUNK_SIZE=1024 hazard starts to matter, at a different
+    threshold than this transport-size one) -- reconsider a temp-file
+    handoff (worker writes, returns a path -- a plain `str`, trivially safe
+    over this same transport) only once payload sizes climb meaningfully
+    past what's now been exercised (multi-GB territory, not the
+    several-hundred-MB figure this note previously used), and re-examine
+    together with design point 3b's `seq_len`-scaling boundary for the
+    chunked-prefill no-op finding if `seq_len` grows substantially further.
 
 --------------------------------------------------------------------------
 DESIGN
@@ -1176,6 +1207,7 @@ def _run_worker(
     batch: int,
     seq_len: int,
     out_path: Path,
+    seed_base: int = 0,
 ) -> None:
     """Runs inside its own process -- same reasoning as bf16_floor.py's
     function of the same name (two LLM() instances in one process is flaky).
@@ -1184,6 +1216,34 @@ def _run_worker(
     collective_rpc worker extension instead of prompt_logprobs=-1, and
     torch.saves them (a list of [batch, seq_len - 1, vocab] float32 tensors)
     to `out_path`.
+
+    `seed_base` shifts BOTH seed axes, not just the token one -- a rerun that
+    only varies tokens against an identical model-RNG state is a weaker
+    discriminating test than one that varies both (see the module docstring's
+    unexplained-max-spike discussion). Per repetition `rep`:
+      - token seed = `10_000 + seed_base + rep` (`_seeded_token_batches`,
+        bf16_floor.py -- unchanged formula, now offset by `seed_base`). ALL
+        repetitions' tokens are drawn up front, in the one
+        `_seeded_token_batches` call below, before the loop that follows it
+        starts -- not one repetition at a time.
+      - model seed = `seed_base + rep`, applied via `torch.manual_seed(...)`
+        once per repetition, inside the loop below. This sets the GLOBAL
+        torch RNG state; it does NOT affect token generation (already done,
+        by the time this loop runs, via `_seeded_token_batches`'s own local
+        `torch.Generator`, which never touches the global RNG), and it is
+        consulted by nothing in this configuration -- greedy decoding
+        (`temperature=0.0`), weights loaded from disk with no random
+        initialization, no dropout, no speculative decoding. It is present
+        so this seed hook is already threaded for a future non-greedy
+        variant of this harness, and so the harness matches phase 1's
+        `model_seeds: range(20)` / `token_seeds: 10000+rep` convention
+        (`tolerance/phase1a.json`) at `seed_base=0`.
+    `seed_base=0` (the default) reproduces every artifact recorded before
+    this parameter existed: the token formula is byte-for-byte unchanged at
+    that offset, and `torch.manual_seed(rep)` has no numerical effect here
+    for the reasons just given. Stated rather than assumed silently: if this
+    harness is ever adapted to non-greedy sampling, dropout, or anything
+    else that reads the global RNG, re-verify that claim before trusting it.
     """
     import torch
     from vllm import LLM
@@ -1218,10 +1278,11 @@ def _run_worker(
         worker_extension_cls=WORKER_EXTENSION_QUALNAME,
     )
 
-    token_batches = _seeded_token_batches(repetitions, batch, seq_len, QWEN3_0_6B.vocab)
+    token_batches = _seeded_token_batches(repetitions, batch, seq_len, QWEN3_0_6B.vocab, seed_base)
     all_reps: list["torch.Tensor"] = []
 
-    for tokens in token_batches:
+    for rep, tokens in enumerate(token_batches):
+        torch.manual_seed(seed_base + rep)  # model seed axis -- see docstring
         rep_positions = [run_one_prompt(llm, row) for row in tokens.tolist()]
         all_reps.append(torch.stack(rep_positions, dim=0))  # [batch, seq_len-1, vocab]
 

@@ -481,30 +481,112 @@ before setting any constant. Full numbers and provenance for both hosts are in
 - **Provenance narrowing applies unchanged from phase 1.** The floor is specific to Qwen3-0.6B,
   bf16, and the (batch, seq_len) it was measured at (2, 8) here. 2b must re-measure if the model,
   dtype, batch, or seq_len change.
-- **Seq_len dependence is still untested for the floor itself, but the extraction bottleneck that
-  blocked measuring it is resolved.** A run at `--repetitions 20 --batch 4 --seq-len 64` was
-  started and killed after an hour without completing: vLLM's `prompt_logprobs=-1` extraction path
-  builds on the order of 150k Python `Logprob` objects per position (one per vocab entry shown,
-  `vocab_size=151936`), and that does not scale to seq_len=64, batch=4. This was a cost of the
-  from-disk logprobs API `bf16_floor.py` uses, not a phase-2a physics finding.
-  `src/weight_sync_bench/phase2/collective_logits.py` replaces that path with a `collective_rpc`
-  call that returns the raw logits tensor directly, and has been verified on the GPU box (not just
-  reasoned from source): bit-identical `[7, 151936]` float32 tensors (`torch.equal`) against the old
-  path for the same prompt, and 272.7x-932.5x faster, with the speedup growing with `seq_len`
-  because the old path's cost scaled with it and the new one's does not (full numbers in
-  `tolerance/phase2b_extraction.json`). This unblocks re-running the seq_len sweep; **the sweep
-  itself has not been re-run yet** -- what's verified so far is the extraction method (single
-  prompt, TP=1, bit-identity plus timing at seq_len in {8, 32, 128}), not the actual TP=1-vs-TP=2
-  differential floor at a larger seq_len. That remains open, and `tolerance/phase2a_bf16_floor.json`
-  (measured at seq_len=8) still stands as the recorded floor until a new sweep supersedes it.
+- **The extraction bottleneck that blocked measuring seq_len dependence is resolved, and the fix
+  was used to run the actual measurement, not just the primitive it's built on.** A run at
+  `--repetitions 20 --batch 4 --seq-len 64` was started and killed after an hour without
+  completing: vLLM's `prompt_logprobs=-1` extraction path builds on the order of 150k Python
+  `Logprob` objects per position (one per vocab entry shown, `vocab_size=151936`), and that does
+  not scale to seq_len=64, batch=4 -- a cost of the from-disk logprobs API `bf16_floor.py` uses,
+  not a phase-2a physics finding. `src/weight_sync_bench/phase2/collective_logits.py` replaces
+  that path with a `collective_rpc` call that returns the raw logits tensor directly (bit-identical
+  `[7, 151936]` float32 tensors, `torch.equal`, against the old path for one prompt, 272.7x-932.5x
+  faster, `tolerance/phase2b_extraction.json`), and
+  `src/weight_sync_bench/phase2/bf16_floor_v2.py` ports the full differential-floor-plus-break-case
+  measurement onto it (same TP1-vs-TP2 design, same subprocess-per-leg pattern, same
+  `SAFETY_FACTOR=15`/`GATE_MARGIN=2`, same break-case injections -- all imported unchanged from
+  `bf16_floor.py`, not re-derived) with `enable_chunked_prefill=False` and
+  `enable_prefix_caching=False` now set explicitly (`bf16_floor.py` leaves both at vLLM's defaults).
+  A reproduction run at `bf16_floor.py`'s exact recorded configuration
+  (`--repetitions 20 --batch 2 --seq-len 8`) gave mean_deviation 3.898e-02, max_deviation 8.125e-01
+  (104.00 ULP), and break-case means 1.772 / 1.570 / 2.984 -- **identical to
+  `tolerance/phase2a_bf16_floor.json` to four significant figures on every one of those six
+  numbers**, despite prefix caching being off this time and on in the original. **This resolves,
+  not merely annotates, the open caveat that repetition independence under prefix caching was
+  unverified**: had caching been silently correlating repetitions, turning it off would have moved
+  the mean by more than four-significant-figure noise; it did not. Full numbers, provenance, and
+  the resolved-caveat record are in `tolerance/phase2a_bf16_floor_v2.json`, which now supersedes
+  `tolerance/phase2a_bf16_floor.json` on extraction path and cache flags while matching it on every
+  measured quantity.
+- **The seq_len sweep this unblocked shows the mean is invariant across a 64x range, and the
+  practical seq_len-dependence caveat is retired, not narrowed.** `--repetitions 20 --batch 4
+  --sweep-seq-len 8,32,128,512` gives mean_deviation 3.895e-02 / 3.725e-02 / 3.791e-02 / 3.280e-02
+  -- a ~16% peak-to-trough spread with no monotonic trend across seq_len 8 to 512, consistent with
+  repetition-count sampling noise rather than a seq_len effect, and every point gates PASS. This is
+  what the design predicted: the mean characterizes the per-element error distribution, and more
+  prompt positions means more independent draws from that same distribution, not a different one.
+  Since the threshold is derived from the mean (`derive_threshold`, `SAFETY_FACTOR=15`), not the
+  max, and the mean is what is now measured invariant, the practical question -- does the floor
+  change enough with seq_len to invalidate the threshold at a longer prompt -- is answered no,
+  within the range measured, and the caveat is retired accordingly for the mean. Also recorded: a
+  `--repetitions 1 --batch 1` smoke run gave mean 3.038e-02, about 22% below the 20-repetition
+  value (batch also differs, 1 vs 2, so not a pure repetitions-only comparison) -- a useful
+  datapoint on how much a quick smoke test's number should be trusted, and the transported payload
+  at seq_len=512 (~1.2GB per call, TP=2's all-gather branch carrying a full tensor back from each
+  rank) moved without failure, pushing the file-handoff-reconsideration threshold
+  `collective_logits.py`'s docstring names well past its previous ~77MB-exercised figure. Full
+  numbers in `tolerance/phase2a_bf16_floor_v2.json`, which is the machine-generated output of this
+  run pulled from the box, not a hand assembly from reported figures -- an earlier hand-written
+  version of that file was lost before it was committed and has been superseded by this one.
+  That file's commit (`43df6399b818cf53207329e7535cb8f7fe070303`) was made directly from the
+  rented box rather than a local checkout, since transferring the artifact back over the Runpod SSH
+  proxy kept failing -- still a commit the user made themselves, per this repo's git policy, just
+  from a different machine than usual.
+- **The seq_len=128 point's max is an unexplained spike, not an illustration of the
+  order-statistic mechanism -- an earlier version of this document said the latter and was
+  wrong.** `max_ulp` across the sweep is 104.0 / 168.0 / 1192.0 / 156.0 (`max_deviation` 0.8125 /
+  1.3125 / 9.3125 / 1.21875) at seq_len 8 / 32 / 128 / 512. Phase 1's order-statistic finding
+  (`tolerance/phase1a.json`) was a monotonic drift upward with more draws (11.5 -> 14 ULP going
+  from 5 to 20 repetitions, same distribution, more samples). This is not that: the max spikes 7x
+  at seq_len=128 and falls back *below* the seq_len=32 value at seq_len=512, despite seq_len=512
+  drawing from roughly 6.21 billion pooled elements (20 reps x 4 batch x 511 rows x 151936 vocab)
+  against seq_len=128's ~1.54 billion -- about 4x more draws landing on a smaller max. Calling the
+  seq_len=128 spike "a clean, real illustration" of unconverged-order-statistic behavior, as an
+  earlier revision of this document did, explains past the actual shape of the data rather than
+  accounting for it. **Corrected: the spike is unexplained.** It is either a genuine, rare
+  catastrophic-cancellation outlier on one of ~1.54 billion element-comparisons in that run, or a
+  bug; both remain open. The stronger argument for mean-as-primary is the spike's magnitude, not a
+  drift story: at seq_len=128, `max_deviation` (9.3125) is ~245.6x the floor mean at that same
+  point (3.791e-02) and ~3.63x the weakest break case measured in that same run
+  (`case2_oproj_col_permute`, 2.5637) -- had the gate used max instead of mean, this single
+  point's noise floor would have exceeded a real injected layout bug, and the gate would have
+  failed to distinguish "correct execution, one outlier element" from "genuinely broken sharding."
+  Same-run evidence makes the case even more directly: the outlier element (9.3125) is one value
+  among `4 * 127 * 151936 = 77,183,488` elements in the single repetition-cell that contains it, so
+  it contributes `9.3125 / 77,183,488 ~= 1.2065e-07` to that cell's own mean -- about 5.5 orders of
+  magnitude (a factor of ~3.18e-06) below the reported mean_deviation (3.791e-02). One anomalous
+  element moved the max 7x while being arithmetically invisible to a mean averaged over tens of
+  millions of siblings, from the same run, not a comparison across runs or against break-case
+  values. The discriminating test is recorded in `tolerance/phase2a_bf16_floor_v2.json` rather than
+  left to be lost: `--repetitions 20 --batch 4 --seq-len 128 --seed-base 1000`. `--seed-base` is now
+  implemented (`collective_logits._run_worker`) and shifts BOTH seed axes, not just tokens -- token
+  seed becomes `10_000 + seed_base + rep`, model seed becomes `seed_base + rep` via
+  `torch.manual_seed(...)` once per repetition, mirroring phase 1's `model_seeds: range(20)` /
+  `token_seeds: 10000+rep` convention (`tolerance/phase1a.json`) at the default offset. **The
+  default (`--seed-base 0`, i.e. omitting the flag) reproduces this recorded run exactly** -- the
+  token formula is unchanged at that offset, and the model seed has no numerical effect under this
+  harness's greedy (`temperature=0.0`) decoding regardless of its value, so nothing recorded before
+  this flag existed becomes unreproducible by its own stated command. Reproducing near 1192 ULP at
+  `--seed-base 1000` means a specific element is consistently disagreeing and is worth locating;
+  landing back in the 100-200 ULP range means the spike was a one-off draw, and the artifact should
+  say that instead of claiming a mechanism. The gate is unaffected either way -- it derives the
+  threshold from the mean, not the max.
+- **Provenance narrowing still applies to model, dtype, and batch.** The floor is specific to
+  Qwen3-0.6B and bf16; 2b must re-measure if either changes. seq_len is now measured stable across
+  8-512 at batch=4 (and separately confirmed unaffected by prefix caching at batch=2), so it is no
+  longer in the same "must re-measure on any change" category the four-input phase 1 dependency
+  names -- but `batch` itself has not been swept the way `seq_len` was, and remains an open input
+  in that sense.
 
-**Gate verdict: PASS on the physics.** All three break cases at 20 reps sit 40x-77x above the
-measured floor mean (1.772 / 1.570 / 2.984 against 3.898e-02) and clear the revised threshold
-(0.5847) by 2.7x-5.1x. The pre-measurement risk estimate above (naive bf16 scaling predicting a
-floor near 0.109 and case 3 possibly undetectable) did not materialize: the measured floor
-(3.898e-02) is about 3x better than that estimate, and case 3 (norm permutation) is measured as the
-**strongest** break (2.984), not the weakest -- the weakest is case 2 (o_proj/down column
-permutation, 1.570). Proceed to 2b.
+**Gate verdict: PASS on the physics, now independently reproduced.** All three break cases at 20
+reps sit 40x-77x above the measured floor mean (1.772 / 1.570 / 2.984 against 3.898e-02) and clear
+the revised threshold (0.5847) by 2.7x-5.1x. The pre-measurement risk estimate above (naive bf16
+scaling predicting a floor near 0.109 and case 3 possibly undetectable) did not materialize: the
+measured floor (3.898e-02) is about 3x better than that estimate, and case 3 (norm permutation) is
+measured as the **strongest** break (2.984), not the weakest -- the weakest is case 2 (o_proj/down
+column permutation, 1.570). This exact result -- floor, break-case means, and verdict -- was
+reproduced via the `collective_rpc` extraction path with prefix caching and chunked prefill both
+disabled (`tolerance/phase2a_bf16_floor_v2.json`), and the gate additionally passes at seq_len 32,
+128, and 512. Proceed to 2b.
 
 ### Phase 2a's break magnitudes are not comparable to phase 1's
 
