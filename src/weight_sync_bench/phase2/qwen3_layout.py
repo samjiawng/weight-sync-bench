@@ -52,11 +52,14 @@ checking.
   too (`missing_from_inspection`), not silently skipped.
 
 - `check_content_predictions(geo, tp_degree, tp1_full_tensors,
-  tp2_rank_tensors)`: for `qkv_proj` and `gate_up_proj` (layer 0,
+  tp_rank_tensors)`: for `qkv_proj` and `gate_up_proj` (layer 0,
   representative -- every layer shares the same geometry and placement),
   calls THIS REPO'S OWN `reshard.split_tensor` on the REAL TP=1 tensor with
-  the predicted `ShardSpec`, and compares the result to the REAL TP=2
-  rank-local tensor with `torch.equal`. This is not a parallel, hand-derived
+  the predicted `ShardSpec` at `tp_degree` (2 or 4 -- nothing about this
+  function is specific to 2; `tp1_full_tensors` is always TP=1's, since
+  that is always the reference every other degree reshards against), and
+  compares the result to the REAL `tp_degree`-rank-local tensor with
+  `torch.equal`, once per rank. This is not a parallel, hand-derived
   formula re-checked against inspection's hashes (an earlier revision of
   `param_layout_inspection.py` did that, with `_qkv_head_ranges`/
   `_gate_up_ranges`/`slice_hashes` computing per-head ranges independently
@@ -228,13 +231,17 @@ def check_shape_predictions(
 
 def check_content_predictions(
     geo: CheckpointGeometry,
-    tp2_degree: int,
+    tp_degree: int,
     tp1_full_tensors: dict[str, "torch.Tensor"],
-    tp2_rank_tensors: dict[str, list["torch.Tensor"]],
+    tp_rank_tensors: dict[str, list["torch.Tensor"]],
 ) -> dict[str, Any]:
     """Check 2: content prediction. reshard.split_tensor(TP=1's real tensor,
-    the predicted ShardSpec, rank) vs TP=2's real rank-local tensor,
-    torch.equal, for qkv_proj and gate_up_proj (layer 0)."""
+    the predicted ShardSpec at `tp_degree`, rank) vs the real rank-local
+    tensor at `tp_degree`, torch.equal, for qkv_proj and gate_up_proj
+    (layer 0). `tp_degree` is whichever non-1 degree is being checked (2 or
+    4) -- TP=1 is always the reference (`tp1_full_tensors`), never the
+    thing being verified, since every other degree is defined as a reshard
+    of it."""
     import torch
 
     placements = _placements(geo)
@@ -245,9 +252,9 @@ def check_content_predictions(
         ("mlp.gate_up_proj.weight", "gate_up_proj"),
     ):
         full = tp1_full_tensors[key]
-        spec = ShardSpec(placements[role], tp2_degree)
+        spec = ShardSpec(placements[role], tp_degree)
         per_rank = []
-        for rank, actual in enumerate(tp2_rank_tensors[key]):
+        for rank, actual in enumerate(tp_rank_tensors[key]):
             predicted = split_tensor(full, spec, rank)
             shapes_match = predicted.shape == actual.shape
             equal = shapes_match and torch.equal(predicted, actual)

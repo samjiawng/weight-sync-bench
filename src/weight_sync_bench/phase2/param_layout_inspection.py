@@ -490,21 +490,36 @@ def _run_worker(model_dir: str, tp: int, out_path: Path) -> None:
     gate_up_tensors = [_reconstruct_tensor(*r) for r in gate_up_raw]
 
     rank_identity_check = None
-    if tp == 2:
-        # Task ask: confirm rank 0 and rank 1 hold DIFFERENT contents (sharded),
-        # not just same-shaped tensors that happen to be replicated. Full bytes,
-        # not a hash -- torch.equal and a real max-abs-diff, not a probabilistic
-        # hash-collision argument, since this is the one check standing between
-        # "sharded" and "replicated" and deserves a direct comparison.
-        t0, t1 = qkv_tensors
+    if tp > 1:
+        # Task ask (originally at tp=2 only): confirm ranks hold DIFFERENT
+        # contents (sharded), not just same-shaped tensors that happen to be
+        # replicated. Full bytes, not a hash -- torch.equal and a real
+        # max-abs-diff, not a probabilistic hash-collision argument.
+        #
+        # Generalized to every pair of ranks, not just (0, 1): at tp=4 there
+        # are 4 ranks and C(4,2)=6 pairs; checking only rank0-vs-rank1 would
+        # miss a bug where, say, ranks 0 and 2 were accidentally identical
+        # while 0-vs-1 correctly differed.
+        pairs = []
+        for i in range(len(qkv_tensors)):
+            for j in range(i + 1, len(qkv_tensors)):
+                a, b = qkv_tensors[i], qkv_tensors[j]
+                same_shape = a.shape == b.shape
+                pairs.append(
+                    {
+                        "ranks": [i, j],
+                        "torch_equal": torch.equal(a, b) if same_shape else False,
+                        "max_abs_diff": (a.float() - b.float()).abs().max().item()
+                        if same_shape
+                        else None,
+                        "shape_mismatch": None if same_shape else [list(a.shape), list(b.shape)],
+                    }
+                )
         rank_identity_check = {
             "param": _QKV_PARAM,
-            "shape": list(t0.shape),
-            "torch_equal": torch.equal(t0, t1) if t0.shape == t1.shape else False,
-            "max_abs_diff": (t0.float() - t1.float()).abs().max().item()
-            if t0.shape == t1.shape
-            else None,
-            "shape_mismatch": None if t0.shape == t1.shape else [list(t0.shape), list(t1.shape)],
+            "shape": list(qkv_tensors[0].shape),
+            "all_pairs_distinct": all(not p["torch_equal"] for p in pairs),
+            "pairs": pairs,
         }
 
     out_path.write_text(
@@ -514,7 +529,7 @@ def _run_worker(model_dir: str, tp: int, out_path: Path) -> None:
                 "per_rank_modules": per_rank_modules,
                 "q_norm_hashes": q_norm_hashes,
                 "k_norm_hashes": k_norm_hashes,
-                "rank0_vs_rank1_qkv_proj": rank_identity_check,
+                "rank_identity_check_qkv_proj": rank_identity_check,
             },
             indent=2,
         )
@@ -554,24 +569,39 @@ def _spawn_worker(python: str, model_dir: str, tp: int, out_path: Path) -> None:
     )
 
 
-def _check_norm_replication(tp1: dict[str, Any], tp2: dict[str, Any]) -> dict[str, Any]:
+# Every TP degree the differential covers. TP=1 is always the reference leg
+# (never itself "checked" against another degree); 2 and 4 are each checked
+# against it independently. Adding a degree here is the only change needed
+# to sweep it -- everything below reads this tuple rather than assuming two
+# legs. n_kv_heads=8 divides every one of these evenly (no GQA replication;
+# see geometry.py/qwen3_layout.py), so none of them should raise
+# UnsupportedLayout for Qwen3-0.6B specifically -- if one does, that is
+# itself the finding disproving the source-reading prediction.
+DEGREES = (1, 2, 4)
+
+
+def _check_norm_replication(tp1: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
     """q_norm/k_norm are Replicated() -- no split_tensor call is meaningful
     for a placement that never changes bytes across TP degree, so this stays
     a direct hash-equality check rather than routing through
-    qwen3_layout.check_content_predictions."""
+    qwen3_layout.check_content_predictions. `other` can be any non-1 degree's
+    leg (its q_norm_hashes/k_norm_hashes lists are as long as that degree has
+    ranks) -- nothing here is specific to tp=2."""
     tp1_q_norm = tp1["q_norm_hashes"][0][0]["sha256"]
     tp1_k_norm = tp1["k_norm_hashes"][0][0]["sha256"]
     return {
-        "q_norm_identical_across_tp1_and_every_tp2_rank": all(
-            r[0]["sha256"] == tp1_q_norm for r in tp2["q_norm_hashes"]
+        "q_norm_identical_across_tp1_and_every_rank": all(
+            r[0]["sha256"] == tp1_q_norm for r in other["q_norm_hashes"]
         ),
-        "k_norm_identical_across_tp1_and_every_tp2_rank": all(
-            r[0]["sha256"] == tp1_k_norm for r in tp2["k_norm_hashes"]
+        "k_norm_identical_across_tp1_and_every_rank": all(
+            r[0]["sha256"] == tp1_k_norm for r in other["k_norm_hashes"]
         ),
     }
 
 
-def inspect_layouts(model_dir: str | None = None, python: str = sys.executable) -> dict[str, Any]:
+def inspect_layouts(
+    model_dir: str | None = None, python: str = sys.executable, degrees: tuple[int, ...] = DEGREES
+) -> dict[str, Any]:
     import tempfile
 
     import torch
@@ -579,24 +609,32 @@ def inspect_layouts(model_dir: str | None = None, python: str = sys.executable) 
 
     from .qwen3_layout import check_content_predictions, check_shape_predictions
 
+    if 1 not in degrees:
+        raise ValueError(f"degrees must include 1 (the reference leg every other degree is checked against), got {degrees}")
+
     checkpoint_dir = model_dir or snapshot_download(MODEL_ID)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         results: dict[int, dict[str, Any]] = {}
         tensors: dict[int, dict[str, Any]] = {}
-        for tp in (1, 2):
+        for tp in degrees:
             out_path = tmp_path / f"tp{tp}.json"
             _spawn_worker(python, checkpoint_dir, tp, out_path)
             results[tp] = json.loads(out_path.read_text())
             tensors[tp] = torch.load(out_path.with_suffix(".pt"))
 
     shape_checks = {
-        tp: check_shape_predictions(QWEN3_0_6B, tp, results[tp]["per_rank_modules"])
-        for tp in (1, 2)
+        tp: check_shape_predictions(QWEN3_0_6B, tp, results[tp]["per_rank_modules"]) for tp in degrees
     }
-    content_check = check_content_predictions(QWEN3_0_6B, 2, tensors[1], tensors[2])
-    norm_check = _check_norm_replication(results[1], results[2])
+    content_checks = {
+        tp: check_content_predictions(QWEN3_0_6B, tp, tensors[1], tensors[tp])
+        for tp in degrees
+        if tp != 1
+    }
+    norm_checks = {
+        tp: _check_norm_replication(results[1], results[tp]) for tp in degrees if tp != 1
+    }
 
     report = {
         "phase": "2b",
@@ -604,11 +642,11 @@ def inspect_layouts(model_dir: str | None = None, python: str = sys.executable) 
         "model_id": MODEL_ID,
         "checkpoint_dir": checkpoint_dir,
         "geometry": asdict(QWEN3_0_6B),
-        "tp1": results[1],
-        "tp2": results[2],
+        "degrees": list(degrees),
+        "legs": results,
         "shape_prediction_check": shape_checks,
-        "content_prediction_check": content_check,
-        "norm_replication_check": norm_check,
+        "content_prediction_check": content_checks,
+        "norm_replication_check": norm_checks,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
@@ -618,8 +656,9 @@ def inspect_layouts(model_dir: str | None = None, python: str = sys.executable) 
 
 def _print_report(report: dict[str, Any]) -> None:
     print(f"phase 2b param layout inspection -> {ARTIFACT}")
-    for tp in (1, 2):
-        leg = report[f"tp{tp}"]
+    degrees = report["degrees"]
+    for tp in degrees:
+        leg = report["legs"][tp]
         print(f"\n  TP={tp}, {len(leg['per_rank_modules'])} rank(s):")
         for rank_report in leg["per_rank_modules"]:
             print(f"    rank {rank_report['rank']}:")
@@ -630,41 +669,76 @@ def _print_report(report: dict[str, Any]) -> None:
                 print(f"      {m['name']:<45} {m['kind']:<26} shape={shape} contiguous={contiguous}")
 
     print("\n  check 1 -- shape prediction (LayoutTable's predicted shape vs inspection):")
-    for tp, check in report["shape_prediction_check"].items():
+    for tp_key, check in report["shape_prediction_check"].items():
         print(
-            f"    TP={tp}: {check['checked']}/{check['predicted_total']} checked, "
+            f"    TP={tp_key}: {check['checked']}/{check['predicted_total']} checked, "
             f"match={check['shape_predictions_match']}"
         )
         for mm in check["mismatches"]:
             print(f"      MISMATCH rank={mm['rank']} {mm['param']}: predicted={mm['predicted']} actual={mm['actual']}")
 
-    print("\n  check 2 -- content prediction (reshard.split_tensor(TP1 real tensor) vs TP2 real tensor):")
-    for param, per_rank in report["content_prediction_check"].items():
-        for r in per_rank:
-            print(f"    {param} rank={r['rank']}: torch.equal={r['torch_equal']} max_abs_diff={r['max_abs_diff']}")
+    print("\n  check 2 -- content prediction (reshard.split_tensor(TP1 real tensor) vs real tensor at each other degree):")
+    for tp_key, per_param in report["content_prediction_check"].items():
+        for param, per_rank in per_param.items():
+            for r in per_rank:
+                print(f"    TP={tp_key} {param} rank={r['rank']}: torch.equal={r['torch_equal']} max_abs_diff={r['max_abs_diff']}")
 
-    n = report["norm_replication_check"]
-    print("\n  q_norm identical across TP1/TP2 :", n["q_norm_identical_across_tp1_and_every_tp2_rank"])
-    print("  k_norm identical across TP1/TP2 :", n["k_norm_identical_across_tp1_and_every_tp2_rank"])
+    for tp_key, n in report["norm_replication_check"].items():
+        print(f"\n  TP={tp_key} q_norm identical vs TP1 :", n["q_norm_identical_across_tp1_and_every_rank"])
+        print(f"  TP={tp_key} k_norm identical vs TP1 :", n["k_norm_identical_across_tp1_and_every_rank"])
 
-    identity = report["tp2"]["rank0_vs_rank1_qkv_proj"]
-    print(f"\n  TP=2 rank0 vs rank1, {identity['param']} {tuple(identity['shape'])}:")
-    print(f"    torch.equal   : {identity['torch_equal']}")
-    print(f"    max_abs_diff  : {identity['max_abs_diff']}")
+    for tp in degrees:
+        if tp == 1:
+            continue
+        leg = report["legs"][tp]
+        identity = leg["rank_identity_check_qkv_proj"]
+        print(f"\n  TP={tp} rank-pairwise identity, {identity['param']} {tuple(identity['shape'])}:")
+        print(f"    all pairs distinct (sharded, not replicated): {identity['all_pairs_distinct']}")
+        for p in identity["pairs"]:
+            print(f"      ranks {p['ranks']}: torch.equal={p['torch_equal']} max_abs_diff={p['max_abs_diff']}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--model-dir", type=str, default=None)
-    parser.add_argument("--tp", type=int, default=1, choices=(1, 2))
+    # No top-level default: None is how the check below tells "the user
+    # explicitly passed --tp" apart from "they didn't." A numeric default
+    # here would make that indistinguishable and silently defeat the check.
+    parser.add_argument("--tp", type=int, default=None, choices=DEGREES, help=argparse.SUPPRESS)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
     if args.worker:
-        assert args.model_dir and args.out
+        assert args.model_dir and args.out and args.tp is not None
         _run_worker(args.model_dir, args.tp, args.out)
         return
+
+    # `--tp` is accepted by argparse at the top level only because it is the
+    # SAME parser `_spawn_worker` re-invokes with `--worker` for each internal
+    # leg (main() -> --worker branch above). Without this check, a user
+    # passing `--tp 1` at the top level would have it silently ignored:
+    # inspect_layouts() always runs every degree in DEGREES regardless, so
+    # the flag would look like it selected one leg while actually doing
+    # nothing -- accepted, defaulted, validated by `choices`, and never read.
+    # That is the same failure shape as a validation check that passes
+    # everything it should have caught: it looks like protection and provides
+    # none. FAIL LOUDLY here instead.
+    #
+    # Do NOT "fix" this by making the top-level path honor `--tp` and run a
+    # single leg -- that would let someone silently compute half the
+    # differential (e.g. only ever run TP=1) and believe they'd validated the
+    # cross-degree invariant this module exists to check. If a single-leg
+    # top-level mode is ever genuinely wanted, it needs a differently-named
+    # flag that makes clear it is NOT running the full comparison, not a
+    # repurposing of this one.
+    if args.tp is not None:
+        parser.error(
+            "--tp has no effect at the top level (without --worker): every "
+            f"degree in {DEGREES} is always run, since the differential this "
+            "module computes requires all of them. Pass --tp only together "
+            "with --worker (internal single-leg use)."
+        )
 
     report = inspect_layouts()
     _print_report(report)
