@@ -1,0 +1,476 @@
+{
+  "phase": "2a",
+  "supersedes": "Supersedes tolerance/phase2a_bf16_floor.json on extraction path and cache flags only, while measuring the same quantity (TP1-vs-TP2 mean absolute logit deviation under bf16, and the same three break-case injections against it). Extraction: collective_rpc (weight_sync_bench.phase2.collective_logits.run_one_prompt) instead of SamplingParams(prompt_logprobs=-1) plus a Python-object scatter loop -- see tolerance/phase2b_extraction.json for the bit-identity and timing verification this port relies on. Cache flags: enable_chunked_prefill=False and enable_prefix_caching=False are now set explicitly (bf16_floor.py leaves both at vLLM's defaults, i.e. on); this resolved tolerance/phase2a_bf16_floor.json's own recorded caveat that repetition independence under prefix caching was unverified there -- in this artifact independence is guaranteed by construction, not merely assumed, AND a same-configuration reproduction run (tolerance/phase2a_bf16_floor_v2.json's 'reproduction' block) confirmed the two are numerically identical to four significant figures, so caching being on during the original measurement demonstrably did not affect the floor. SAFETY_FACTOR, GATE_MARGIN, the mean-as-primary-statistic rule, the differential TP1-vs-TP2 design, and every break-case injection are unchanged -- imported directly from bf16_floor.py, not re-derived. This module's own measurement composition (the full repetitions/TP2/break-case/gate pipeline run end to end with the new extraction path) has been verified by execution: a reproduction run reproduced tolerance/phase2a_bf16_floor.json's recorded floor and break-case means to four significant figures, and a seq_len sweep (8/32/128/512) passed the gate at every point -- see tolerance/phase2a_bf16_floor_v2.json. A run at OTHER parameters than those two (a different model, dtype, or far outside the swept seq_len range) is not covered by that verification and should be treated with the same caution as any first run.",
+  "configuration": {
+    "enforce_eager": true,
+    "enable_chunked_prefill": false,
+    "enable_prefix_caching": false,
+    "worker_extension_cls": "weight_sync_bench.phase2.collective_logits.LogitsHookWorkerExtension",
+    "extraction_method": "collective_rpc"
+  },
+  "environment": {
+    "python": "3.12.3",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39",
+    "machine": "x86_64",
+    "model": "Qwen/Qwen3-0.6B",
+    "pinned_vllm_version": "0.28.0",
+    "dtype": "torch.bfloat16",
+    "torch": "2.13.0+cu130",
+    "cuda_available": true,
+    "gpu_count": 4,
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "cuda_version": "13.0",
+    "driver_version": "580.159.04",
+    "vllm_installed_version": "0.28.0",
+    "git_commit": "639bc755134b25c1acf82a3683dd43d3ac7bd45e"
+  },
+  "measurement": {
+    "repetitions": 20,
+    "batch": 2,
+    "seq_len": 8,
+    "seed_base": 0,
+    "tp": 2,
+    "layer": 20
+  },
+  "floor": {
+    "cells": [
+      {
+        "max": 0.34375,
+        "median": 0.03125,
+        "mean": 0.03902466967701912
+      },
+      {
+        "max": 0.375,
+        "median": 0.03125,
+        "mean": 0.036713581532239914
+      },
+      {
+        "max": 0.75,
+        "median": 0.03125,
+        "mean": 0.04411138594150543
+      },
+      {
+        "max": 0.75,
+        "median": 0.046875,
+        "mean": 0.06317570060491562
+      },
+      {
+        "max": 0.375,
+        "median": 0.025390625,
+        "mean": 0.031783971935510635
+      },
+      {
+        "max": 0.40625,
+        "median": 0.02734375,
+        "mean": 0.03444937616586685
+      },
+      {
+        "max": 0.4813232421875,
+        "median": 0.03125,
+        "mean": 0.03760315850377083
+      },
+      {
+        "max": 0.4140625,
+        "median": 0.03125,
+        "mean": 0.037301044911146164
+      },
+      {
+        "max": 0.75,
+        "median": 0.03125,
+        "mean": 0.04377175495028496
+      },
+      {
+        "max": 0.30078125,
+        "median": 0.0234375,
+        "mean": 0.02995683066546917
+      },
+      {
+        "max": 0.34375,
+        "median": 0.03125,
+        "mean": 0.03461049124598503
+      },
+      {
+        "max": 0.3125,
+        "median": 0.03125,
+        "mean": 0.0346163809299469
+      },
+      {
+        "max": 0.375,
+        "median": 0.03125,
+        "mean": 0.03893342241644859
+      },
+      {
+        "max": 0.34375,
+        "median": 0.03125,
+        "mean": 0.04178600013256073
+      },
+      {
+        "max": 0.8125,
+        "median": 0.03125,
+        "mean": 0.045780736953020096
+      },
+      {
+        "max": 0.375,
+        "median": 0.03125,
+        "mean": 0.03772700950503349
+      },
+      {
+        "max": 0.6259765625,
+        "median": 0.03125,
+        "mean": 0.042589906603097916
+      },
+      {
+        "max": 0.375,
+        "median": 0.0283203125,
+        "mean": 0.03258267790079117
+      },
+      {
+        "max": 0.3154296875,
+        "median": 0.03125,
+        "mean": 0.03772403299808502
+      },
+      {
+        "max": 0.34375,
+        "median": 0.03125,
+        "mean": 0.035349685698747635
+      }
+    ],
+    "mean_deviation": 0.038979590963572265,
+    "max_deviation": 0.8125,
+    "mean_ulp": 4.98938764333725,
+    "max_ulp": 104.0,
+    "threshold": 0.584693864453584,
+    "checkpoint_dir": "/workspace/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
+  },
+  "break_cases": [
+    {
+      "case": "case1_qkv_head_permute",
+      "mean_deviation": 0.44486729353666304,
+      "cells": [
+        {
+          "max": 3.87890625,
+          "median": 0.3125,
+          "mean": 0.4172210097312927
+        },
+        {
+          "max": 5.7578125,
+          "median": 0.3125,
+          "mean": 0.4242666959762573
+        },
+        {
+          "max": 5.4453125,
+          "median": 0.359375,
+          "mean": 0.47958627343177795
+        },
+        {
+          "max": 5.21875,
+          "median": 0.3671875,
+          "mean": 0.5048507452011108
+        },
+        {
+          "max": 3.6640625,
+          "median": 0.296875,
+          "mean": 0.38868680596351624
+        },
+        {
+          "max": 4.78125,
+          "median": 0.28125,
+          "mean": 0.3913571238517761
+        },
+        {
+          "max": 3.65625,
+          "median": 0.34765625,
+          "mean": 0.4503682553768158
+        },
+        {
+          "max": 5.3046875,
+          "median": 0.3203125,
+          "mean": 0.42122891545295715
+        },
+        {
+          "max": 3.9296875,
+          "median": 0.3355712890625,
+          "mean": 0.44062352180480957
+        },
+        {
+          "max": 3.8125,
+          "median": 0.3046875,
+          "mean": 0.4011565148830414
+        },
+        {
+          "max": 4.0,
+          "median": 0.3125,
+          "mean": 0.4082491993904114
+        },
+        {
+          "max": 4.015625,
+          "median": 0.3203125,
+          "mean": 0.4197383522987366
+        },
+        {
+          "max": 3.9912109375,
+          "median": 0.318359375,
+          "mean": 0.4097219705581665
+        },
+        {
+          "max": 6.859375,
+          "median": 0.388671875,
+          "mean": 0.5373727083206177
+        },
+        {
+          "max": 7.609375,
+          "median": 0.375,
+          "mean": 0.5190252065658569
+        },
+        {
+          "max": 4.0625,
+          "median": 0.2890625,
+          "mean": 0.38601210713386536
+        },
+        {
+          "max": 8.765625,
+          "median": 0.4345703125,
+          "mean": 0.6150338649749756
+        },
+        {
+          "max": 3.53125,
+          "median": 0.28125,
+          "mean": 0.3652621805667877
+        },
+        {
+          "max": 5.3359375,
+          "median": 0.345703125,
+          "mean": 0.46816352009773254
+        },
+        {
+          "max": 4.6796875,
+          "median": 0.3359375,
+          "mean": 0.44942089915275574
+        }
+      ]
+    },
+    {
+      "case": "case2_oproj_col_permute",
+      "mean_deviation": 0.20922618210315705,
+      "cells": [
+        {
+          "max": 2.04296875,
+          "median": 0.125,
+          "mean": 0.16749651730060577
+        },
+        {
+          "max": 2.90625,
+          "median": 0.14501953125,
+          "mean": 0.20582199096679688
+        },
+        {
+          "max": 3.09375,
+          "median": 0.1875,
+          "mean": 0.2655058205127716
+        },
+        {
+          "max": 4.296875,
+          "median": 0.1875,
+          "mean": 0.2733939588069916
+        },
+        {
+          "max": 2.65625,
+          "median": 0.109375,
+          "mean": 0.15607750415802002
+        },
+        {
+          "max": 4.1005859375,
+          "median": 0.09375,
+          "mean": 0.15096653997898102
+        },
+        {
+          "max": 2.09375,
+          "median": 0.125,
+          "mean": 0.17481550574302673
+        },
+        {
+          "max": 2.046875,
+          "median": 0.109375,
+          "mean": 0.16411326825618744
+        },
+        {
+          "max": 2.609375,
+          "median": 0.1640625,
+          "mean": 0.22371900081634521
+        },
+        {
+          "max": 2.203125,
+          "median": 0.15625,
+          "mean": 0.20148999989032745
+        },
+        {
+          "max": 4.3818359375,
+          "median": 0.14453125,
+          "mean": 0.21318785846233368
+        },
+        {
+          "max": 3.8515625,
+          "median": 0.1484375,
+          "mean": 0.21215888857841492
+        },
+        {
+          "max": 3.0703125,
+          "median": 0.1431884765625,
+          "mean": 0.21206523478031158
+        },
+        {
+          "max": 7.375,
+          "median": 0.1875,
+          "mean": 0.30841368436813354
+        },
+        {
+          "max": 5.140625,
+          "median": 0.1875,
+          "mean": 0.28626707196235657
+        },
+        {
+          "max": 2.65625,
+          "median": 0.125,
+          "mean": 0.17812655866146088
+        },
+        {
+          "max": 3.484375,
+          "median": 0.15625,
+          "mean": 0.22702765464782715
+        },
+        {
+          "max": 1.359375,
+          "median": 0.109375,
+          "mean": 0.14037688076496124
+        },
+        {
+          "max": 2.65625,
+          "median": 0.15625,
+          "mean": 0.2205342948436737
+        },
+        {
+          "max": 2.9296875,
+          "median": 0.140625,
+          "mean": 0.2029654085636139
+        }
+      ]
+    },
+    {
+      "case": "case3_norm_permute",
+      "mean_deviation": 1.0519042909145355,
+      "cells": [
+        {
+          "max": 7.5,
+          "median": 0.7919921875,
+          "mean": 0.9830407500267029
+        },
+        {
+          "max": 14.3828125,
+          "median": 0.7734375,
+          "mean": 1.060471773147583
+        },
+        {
+          "max": 12.1796875,
+          "median": 0.8828125,
+          "mean": 1.2086626291275024
+        },
+        {
+          "max": 12.921875,
+          "median": 0.9215087890625,
+          "mean": 1.208154559135437
+        },
+        {
+          "max": 9.9375,
+          "median": 0.87109375,
+          "mean": 1.141274333000183
+        },
+        {
+          "max": 11.1533203125,
+          "median": 0.73046875,
+          "mean": 0.9554210901260376
+        },
+        {
+          "max": 7.828125,
+          "median": 0.640625,
+          "mean": 0.8253992199897766
+        },
+        {
+          "max": 10.3203125,
+          "median": 0.772216796875,
+          "mean": 1.037125825881958
+        },
+        {
+          "max": 9.515625,
+          "median": 0.849609375,
+          "mean": 1.1088839769363403
+        },
+        {
+          "max": 7.9375,
+          "median": 0.693359375,
+          "mean": 0.9102432131767273
+        },
+        {
+          "max": 11.947265625,
+          "median": 0.734375,
+          "mean": 0.9936046600341797
+        },
+        {
+          "max": 10.5078125,
+          "median": 0.8243408203125,
+          "mean": 1.082110047340393
+        },
+        {
+          "max": 9.623046875,
+          "median": 0.78125,
+          "mean": 1.0155963897705078
+        },
+        {
+          "max": 13.171875,
+          "median": 0.7880859375,
+          "mean": 1.0496407747268677
+        },
+        {
+          "max": 13.59375,
+          "median": 0.947265625,
+          "mean": 1.3620800971984863
+        },
+        {
+          "max": 11.6796875,
+          "median": 0.7421875,
+          "mean": 0.9888414144515991
+        },
+        {
+          "max": 16.14697265625,
+          "median": 0.8125,
+          "mean": 1.1160821914672852
+        },
+        {
+          "max": 11.84375,
+          "median": 0.68359375,
+          "mean": 0.8826788663864136
+        },
+        {
+          "max": 17.2578125,
+          "median": 0.84228515625,
+          "mean": 1.2030185461044312
+        },
+        {
+          "max": 7.34375,
+          "median": 0.71875,
+          "mean": 0.9057554602622986
+        }
+      ]
+    }
+  ],
+  "gate": {
+    "threshold": 0.584693864453584,
+    "gate_margin": 2,
+    "clears": {
+      "case1_qkv_head_permute": false,
+      "case2_oproj_col_permute": false,
+      "case3_norm_permute": false
+    },
+    "verdict": "fail"
+  },
+  "generated_at": "2026-09-04T22:01:09+00:00"
+}
