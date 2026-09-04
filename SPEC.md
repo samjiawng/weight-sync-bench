@@ -497,6 +497,52 @@ floor near 0.109 and case 3 possibly undetectable) did not materialize: the meas
 **strongest** break (2.984), not the weakest -- the weakest is case 2 (o_proj/down column
 permutation, 1.570). Proceed to 2b.
 
+### Phase 2a's break magnitudes are not comparable to phase 1's
+
+Phase 1 (fp32, toy model): case 3 (permuted norm) was the **weakest** break at 0.338-0.413, cases
+1/2 ran 1.1-2.5. Phase 2a (bf16, Qwen3-0.6B) above: case 3 is the **strongest** at 2.984, case 2
+the weakest at 1.570. The rank order inverted.
+
+Two variables changed at once (dtype and model), so this was investigated by attribution before
+being explained -- CPU-only, no GPU, nothing re-measured against vLLM: the real Qwen3-0.6B
+checkpoint was downloaded and inspected directly, and this repo's own toy `ReferenceModel` was
+instantiated for a controlled, same-operation comparison. Full numbers are in
+`tolerance/phase2a_bf16_floor.json`'s `break_case_ordering_inversion` block.
+
+- **Case 3's inversion is a model-distribution effect, not a dtype effect, and it is fully
+  explained.** Applying `bf16_floor.py`'s actual case-3 operation
+  (`torch.roll(w, shifts=w.shape[0]//2)`) by hand to real layer-0 weights gives a relative
+  weight-space perturbation of **0.573** on Qwen3's `input_layernorm` against **0.145** on the
+  toy's `attn_norm` -- a ~4x gap that tracks coefficient of variation almost exactly (0.43 vs 0.10).
+  Qwen3's trained norm weights at layer 0 are right-skewed with mean 0.175 (pooled across all 28
+  layers the tensor has entries up to 106.5, but case 3 only touches layer 0, whose own outliers
+  are milder), against the toy's `normal(1.0, 0.1)` by construction (`model.py:_norm_weight`). A
+  roll-by-half approximately replaces each entry with an unrelated value from elsewhere in the same
+  vector, so its relative perturbation scales with the vector's own spread, not with dtype. This
+  measurement is fp32-vs-fp32 weight arithmetic on CPU, before any forward pass -- the same ~4x gap
+  would appear if both phases ran in fp32. **The ordering inversion is evidence about this model's
+  norm-weight distribution, not evidence about bf16 detectability.**
+- **Case 2's weakening is only partially attributed.** `n_kv_heads` is not a candidate variable at
+  all -- `case2_oproj_col_permute` permutes `o_proj`'s query-head column blocks only and never
+  touches K/V heads. Geometry is a plausible partial contributor (Qwen3 has 2x the toy's heads, 16
+  vs 8, and its o_proj compresses 2048 input channels to 1024 output channels where the toy's is
+  square, 256-to-256), but the strongest CPU-measurable proxy does not confirm it: the same
+  adjacent-head-block swap gives relative weight-space perturbation **1.413** on the toy against
+  **1.367** on Qwen3 -- essentially unchanged (~3%), which cannot account for a 23-38% weaker
+  measured break. Adjacent o_proj head blocks are mildly more correlated on Qwen3 than the toy's
+  independently-random ones (cosine similarities up to 0.29 vs at most 0.01), directionally
+  consistent with a weaker swap but too small and noisy to call a mechanism. Whatever remains is a
+  downstream forward-pass effect -- how the permuted output propagates through the residual stream,
+  the next layer's norm, and the logits -- that requires a real forward pass through the full model
+  to investigate, i.e. a GPU. Recorded as partly geometry, remainder unresolved, not as fully
+  explained.
+- **Consequence for reading these artifacts:** the 40x separation ratio and the PASS verdict above
+  are valid on their own terms, since they compare Qwen3's break magnitudes to Qwen3's own bf16
+  floor measured on the same checkpoint. Any comparison of a phase-1 break magnitude to a phase-2a
+  one, or any reading of the case-3/case-2 rank swap as a statement about bf16 detectability, is
+  not -- it is a statement about the two models' weights and the two independently re-derived
+  injection operations, not about dtype.
+
 ---
 
 ## 2b. Real layout tables
@@ -540,6 +586,11 @@ the safetensors header, not assumed), that change what 2b is:**
   for 2b, not answered here:** does this need a new placement, or is it expressible as
   `HeadPartitioned` with a degenerate `head_dim` (i.e. one norm vector shared by every head in the
   group rather than one per head)? Leave it open until 2b actually has to represent it.
+
+  This question is untouched by the 2a break-case-ordering investigation above. That investigation
+  confirmed `case3_norm_permute` injects into `model.layers.0.input_layernorm.weight` only --
+  `q_norm`/`k_norm` are never read or written by it. So nothing about QK-norm's placement was
+  exercised, measured, or ruled out by 2a; it remains exactly as open as stated here.
 
 ---
 

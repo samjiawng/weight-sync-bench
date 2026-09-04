@@ -8,8 +8,48 @@
     "THE POWER-OF-TEN ROUNDING WAS DROPPED FOR PHASE 2 ONLY. Phase 1's tolerance.py keeps its rounded rule (that module and tolerance/phase1a.json / phase1b.json are untouched by this change). bf16_floor.derive_threshold now returns safety_factor * mean_deviation directly. Rounding cost phase 1 nothing against ~5 orders of magnitude of headroom; against a ~40x budget it can by itself consume up to a 10x tax (e.g. 100 * 4.3e-2 = 4.3 would round to 10, a 2.3x tax on top of the 100x multiplier) that the budget cannot absorb.",
     "PROVENANCE NARROWING APPLIES UNCHANGED FROM PHASE 1: this floor is specific to Qwen3-0.6B, bf16, and the (batch, seq_len) it was measured at (2, 8). 2b must re-measure if the model, dtype, batch, or seq_len change -- same discipline as tolerance/phase1a.json's four-input dependency, not yet re-verified for a second (batch, seq_len) pair here (see next note).",
     "SEQ_LEN DEPENDENCE IS UNTESTED. A run at --repetitions 20 --batch 4 --seq-len 64 was started to check whether the floor's seq_len sensitivity resembles phase 1's, and was killed after an hour without completing. Cause: vLLM's prompt_logprobs=-1 extraction path builds one Python Logprob object per (position, vocab-entry-shown) -- with vocab_size 151936 this is on the order of 150k Python objects per position, and it does not scale to seq_len=64 * batch=4. This is a known cost of the from-disk logprobs API this module uses (see its module docstring), not a phase-2a physics finding. Replacing it with a collective_rpc call that returns the logits tensor directly is 2b work, and is required regardless of this floor measurement since the weight-sync path itself needs that primitive.",
-    "GATE VERDICT: PASS on the physics. All three break cases at 20 reps sit 40x-77x above the measured floor mean (1.772/1.570/2.984 against 3.898e-02) and, under the new threshold (0.5847 = 15 * 3.898e-02), clear the 2x GATE_MARGIN by 2.7x-5.1x. The pre-2a risk estimate (SPEC.md: naive bf16 scaling from the fp32 floor predicted a floor near 0.109 and case 3 possibly undetectable) did not materialize: measured floor (3.898e-02) is about 3x better than that estimate, and case3_norm_permute is measured as the STRONGEST break (2.984), not the weakest -- the weakest is case2_oproj_col_permute (1.570). Proceed to 2b per SPEC.md's gate criteria."
+    "GATE VERDICT: PASS on the physics. All three break cases at 20 reps sit 40x-77x above the measured floor mean (1.772/1.570/2.984 against 3.898e-02) and, under the new threshold (0.5847 = 15 * 3.898e-02), clear the 2x GATE_MARGIN by 2.7x-5.1x. The pre-2a risk estimate (SPEC.md: naive bf16 scaling from the fp32 floor predicted a floor near 0.109 and case 3 possibly undetectable) did not materialize: measured floor (3.898e-02) is about 3x better than that estimate, and case3_norm_permute is measured as the STRONGEST break (2.984), not the weakest -- the weakest is case2_oproj_col_permute (1.570). Proceed to 2b per SPEC.md's gate criteria.",
+    "PHASE 2A's BREAK MAGNITUDES ARE NOT COMPARABLE TO PHASE 1's. In phase 1 (fp32, toy model) case 3 (permuted norm) was the weakest break at 0.338-0.413, cases 1/2 ran 1.1-2.5. Here (bf16, Qwen3-0.6B) case 3 is the strongest at 2.984 and case 2 the weakest at 1.570 -- the rank order inverted. Investigated and attributed below (see 'break_case_ordering_inversion'): the inversion is explained by model/weight-distribution and injection-operation differences between the toy and Qwen3, not by dtype. The 40x separation ratio and the PASS verdict above are still valid on their own terms, since they compare Qwen3's break magnitudes to Qwen3's own bf16 floor measured on the same checkpoint. What is NOT valid is comparing a phase-1 break magnitude to a phase-2a one, or reading the case-3/case-2 rank swap as a statement about bf16 detectability -- it is a statement about this model's weights."
   ],
+  "break_case_ordering_inversion": {
+    "investigated": "2026-09-04, CPU-only (real Qwen3-0.6B checkpoint downloaded and inspected locally; toy ReferenceModel instantiated from this repo's own code; no GPU used, nothing re-measured against vLLM).",
+    "summary": "Two variables changed at once between phase 1 and phase 2a (dtype: fp32 -> bf16, and model: toy -> Qwen3-0.6B). Attribution below points at the model change, not the dtype change, for both cases investigated. Consequence: cross-phase break-magnitude comparisons are not meaningful. Within-phase-2a comparisons (break vs Qwen3's own floor, i.e. the separation ratio and gate verdict) are unaffected.",
+    "case3_mechanism": {
+      "claim": "Case 3's inversion (weakest in phase 1, strongest in phase 2a) is a model-distribution effect, fully explained on CPU, and dtype-independent.",
+      "operation": "torch.roll(w, shifts=w.shape[0]//2) applied to model.layers.0.input_layernorm.weight (bf16_floor.py:480-486) -- the same roll-by-half operation was applied by hand to real weights on CPU to measure its effect in isolation from dtype and from the forward pass.",
+      "measured_relative_perturbation_norm_delta_over_norm_w": {
+        "toy_layer0_attn_norm": 0.145,
+        "toy_kv4_layer0_attn_norm": 0.135,
+        "qwen3_layer0_input_layernorm": 0.573
+      },
+      "measured_weight_distribution_layer0": {
+        "toy_attn_norm": {"mean": 1.003, "std": 0.0996, "coefficient_of_variation": 0.10, "min": 0.722, "max": 1.32, "note": "normal(1.0, 0.1) by construction, model.py:_norm_weight"},
+        "qwen3_input_layernorm": {"mean": 0.175, "std": 0.076, "coefficient_of_variation": 0.43, "min": 0.122, "max": 1.05, "note": "trained, right-skewed, not drawn from any simple distribution; pooled across all 28 layers the tensor has entries up to 106.5 (max|z|=18 sigma), but case3 touches only layer 0 by default, whose own outliers are milder (max|z|=11.5)"}
+      },
+      "mechanism": "A roll-by-half approximately replaces each entry with an unrelated value from elsewhere in the same vector, so the relative perturbation it produces scales with the vector's own coefficient of variation, not with dtype. Real trained norm weights have ~4x the CV of the toy's normal(1.0, 0.1) fixture (0.43 vs 0.10), so the same operation is a ~4x larger weight-space disturbance on Qwen3 (0.573 vs 0.145/0.135).",
+      "dtype_independence": "This entire measurement is fp32-vs-fp32 weight arithmetic on CPU, taken before any forward pass. The same ~4x gap would appear if both phase 1 and phase 2a ran in fp32. The ordering inversion is evidence about this model's norm-weight distribution, not evidence about bf16 detectability."
+    },
+    "case2_attribution": {
+      "claim": "Case 2's weakening (2.053-2.535 on the toy, 1.570 on Qwen3) is only partially attributed. Geometry is a plausible contributor but the strongest CPU-measurable proxy does not confirm it, and n_kv_heads is not a candidate variable at all: case2_oproj_col_permute permutes o_proj's query-head column blocks only and never touches K/V heads.",
+      "geometry": {
+        "toy": {"d_model": 256, "n_heads": 8, "head_dim": 32, "n_heads_x_head_dim": 256, "o_proj_shape": [256, 256]},
+        "qwen3": {"hidden_size": 1024, "n_heads": 16, "head_dim": 128, "n_heads_x_head_dim": 2048, "o_proj_shape": [1024, 2048], "note": "o_proj compresses 2x as many input channels as output channels; toy's is square"}
+      },
+      "operation": "_swap_adjacent_blocks applied to o_proj's input dimension (head-width column blocks), same operation applied by hand to real weights on CPU.",
+      "measured_relative_perturbation_norm_delta_over_norm_W": {
+        "toy": 1.413,
+        "toy_kv4": 1.410,
+        "qwen3": 1.367
+      },
+      "gap_explained_by_weight_space_perturbation": "No. The relative perturbation is essentially unchanged (~3% smaller on Qwen3), which cannot account for a 23-38% weaker measured break. If weight-space geometry alone drove the effect, case 2 should be roughly equally strong on both models.",
+      "adjacent_head_block_cosine_similarity": {
+        "toy": [0.0109, -0.0046, -0.0013, 0.0029],
+        "qwen3": [0.1747, -0.1116, -0.0324, 0.0724, -0.0002, 0.2927, -0.0068, 0.2398],
+        "interpretation": "DIRECTIONAL, NOT AN EXPLANATION. Qwen3's adjacent o_proj head blocks are mildly more correlated with each other than the toy's (which are independent by construction), consistent with a swap mattering less -- but this is a small, noisy signal, not a clean mechanism like case 3's CV scaling. Recorded as an observation to revisit, not as the answer."
+      },
+      "missing_piece": "Whatever remains after geometry is a downstream/forward-pass effect: how the permuted o_proj output propagates through the residual stream, the next layer's norm, and eventually the logits. That requires a real forward pass through the full model (GPU/vLLM), which this investigation did not have access to. Case 2's ordering-inversion contribution is therefore attributed as 'partly geometry, remainder unresolved,' not fully explained -- unlike case 3."
+    }
+  },
   "rule": {
     "description": "threshold = SAFETY_FACTOR * worst observed MEAN deviation (direct multiple, no power-of-ten rounding -- see note above and weight_sync_bench/phase2/bf16_floor.py:derive_threshold)",
     "safety_factor": 15,
