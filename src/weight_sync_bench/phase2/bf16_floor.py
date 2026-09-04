@@ -144,22 +144,36 @@ DEFAULT_REPETITIONS = 5
 DEFAULT_BATCH = 2
 DEFAULT_SEQ_LEN = 8
 
-# Measured, not phase-1-inherited. Two runs (see tolerance/phase2a_bf16_floor.json):
-# 5 reps at batch=2/seq_len=8 gave floor mean 4.296e-02, weakest break 1.757, a
-# 40.9x separation; 20 reps at the same shape gave floor mean 3.898e-02, weakest
-# break 1.570, a 40.3x separation. The mean held within 9% across a 4x increase
-# in repetitions -- phase 1's earlier finding that sample-count drift is small on
-# the mean and large on the max reproduces here (max moved 96 -> 104 ULP over the
-# same two runs). Treat ~40x as the real budget bf16 has to spend, against phase
-# 1's fp32 budget of roughly 10^5 (floor 1.67e-6 against breaks of 0.34-2.5).
+# Measured, not phase-1-inherited, and validated against a measured BAND, not
+# a single draw (see tolerance/phase2a_bf16_floor.json and
+# tolerance/phase2a_bf16_floor_v2.json for the full history). The separation
+# ratio (weakest break / floor mean) is a function of CONFIGURATION, tight
+# within itself across independent prompt draws at fixed config:
+#   - batch=2, seq_len=8, 20 reps: two independently-seeded draws (seed_base
+#     0 and 1000) gave 40.3x and 42.6x -- 5.7% apart. This is the BINDING
+#     (narrower) configuration and the one this project's own break cases run
+#     at by default.
+#   - batch=4, seq_len=128, 20 reps: three independently-seeded draws (seed_base
+#     0, 1000, 2000) gave 67.6x, 69.9x, 69.8x -- under 2.1% apart.
+# Both bands are draw-stable at their own configuration; the ~2x difference
+# BETWEEN the two bands is a real configuration effect (batch/seq_len), not
+# draw noise. An earlier version of this comment cited a single 5-rep-vs-20-rep
+# comparison (40.9x, then thought possibly confounded by sample count); that
+# comparison's "mean held within 9% across a 4x increase in repetitions"
+# finding still stands (phase 1's established pattern -- sample-count drift is
+# small on the mean, large on the max -- reproduces here, max moved 96 -> 104
+# ULP over the same two runs), but the separation ratio's own stability is now
+# confirmed directly, by varying the prompt draw at fixed sample count, not
+# inferred from a repetition-count comparison.
 #
 # SAFETY_FACTOR x GATE_MARGIN must stay strictly below the measured separation
 # ratio, or the gate cannot fail an injected bug no matter how the two factors
 # are split -- that is what carrying over phase 1's 100 x 10 = 1000 unchanged
 # did here: 1000 > 40x, so no break case could ever clear, and the resulting
 # "fail" verdict was an artifact of the unchanged constants, not a finding about
-# bf16. 15 x 2 = 30 stays under 40x with headroom for the ratio to move on a
-# future re-measurement without flipping the gate. The split is asymmetric on
+# bf16. 15 x 2 = 30 stays under the binding 40.3x-42.6x band with ~34% headroom
+# ((40.3 - 30) / 30) at its narrowest observed point, not just under a single
+# draw that might have been favorable by chance. The split is asymmetric on
 # purpose: floor noise (dtype rounding, reduction order) is the larger, better-
 # characterized source of variance here, so it gets the larger factor; the
 # 2x GATE_MARGIN is a thin floor under real-bug detection, not a comfortable

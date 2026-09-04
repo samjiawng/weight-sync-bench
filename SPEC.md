@@ -556,20 +556,47 @@ before setting any constant. Full numbers and provenance for both hosts are in
   magnitude (a factor of ~3.18e-06) below the reported mean_deviation (3.791e-02). One anomalous
   element moved the max 7x while being arithmetically invisible to a mean averaged over tens of
   millions of siblings, from the same run, not a comparison across runs or against break-case
-  values. The discriminating test is recorded in `tolerance/phase2a_bf16_floor_v2.json` rather than
-  left to be lost: `--repetitions 20 --batch 4 --seq-len 128 --seed-base 1000`. `--seed-base` is now
-  implemented (`collective_logits._run_worker`) and shifts BOTH seed axes, not just tokens -- token
-  seed becomes `10_000 + seed_base + rep`, model seed becomes `seed_base + rep` via
-  `torch.manual_seed(...)` once per repetition, mirroring phase 1's `model_seeds: range(20)` /
-  `token_seeds: 10000+rep` convention (`tolerance/phase1a.json`) at the default offset. **The
-  default (`--seed-base 0`, i.e. omitting the flag) reproduces this recorded run exactly** -- the
-  token formula is unchanged at that offset, and the model seed has no numerical effect under this
-  harness's greedy (`temperature=0.0`) decoding regardless of its value, so nothing recorded before
-  this flag existed becomes unreproducible by its own stated command. Reproducing near 1192 ULP at
-  `--seed-base 1000` means a specific element is consistently disagreeing and is worth locating;
-  landing back in the 100-200 ULP range means the spike was a one-off draw, and the artifact should
-  say that instead of claiming a mechanism. The gate is unaffected either way -- it derives the
-  threshold from the mean, not the max.
+  values.
+- **Three draws in at batch=4/seq_len=128, two at batch=2/seq_len=8. The max has no mechanism and
+  needs none -- it's a heavy-tailed statistic, and three samples look exactly like one.**
+  `max_ulp` at batch=4/seq_len=128/20 reps across seed_base 0/1000/2000: 1192.00 / 393.50 / 445.00.
+  Two cluster near ~400 and one sits ~2.8x higher -- consistent with a heavy tail sampled three
+  times, not a pattern demanding its own explanation. None of the three reproduces another; a real
+  single-element bug would have. The "worth locating a specific element" branch is retired. The
+  gate is unaffected -- it derives the threshold from the mean, not the max.
+- **The mean is confirmed invariant across a full prompt-set change, more strongly than the seq_len
+  sweep alone shows.** At batch=4/seq_len=128/20 reps: mean 3.791e-02 / 3.712e-02 / 3.726e-02 across
+  the three seed bases, a 2.1% spread, landing inside the sweep's own 3.280e-02-3.895e-02 band. At
+  batch=2/seq_len=8/20 reps: 3.898e-02 / 3.865e-02, 0.8% apart. This varies the input itself, not
+  just the sample count the seq_len sweep varies -- stronger evidence for the same conclusion.
+- **Prompt-draw dependence of break magnitudes is retired, at both configurations measured -- the
+  earlier "tens-of-percent" finding was entirely a three-way configuration confound, not a real
+  effect.** That comparison set three break-case triples against each other -- the smoke run
+  (`--batch 1 --seq-len 8 --repetitions 1`), the reproduction (`--batch 2 --seq-len 8
+  --repetitions 20`), and the seed_base=1000 rerun (`--batch 4 --seq-len 128 --repetitions 20`) --
+  with batch, seq_len, and repetition count all differing alongside the prompt draw, isolating
+  nothing. With those held fixed and only the draw varied, at two independent configurations, break
+  magnitudes are stable: at batch=4/seq_len=128/20 reps (seed_base 0/1000/2000), case2 (weakest
+  throughout) is 2.564 / 2.596 / 2.602, a 1.5% spread; at batch=2/seq_len=8/20 reps (seed_base
+  0/1000), case2 (weakest throughout) is 1.570 / 1.648, 5.0% apart. Every value at every
+  configuration moves single-digit-percent, not tens. There is no open prompt-draw-dependence
+  question left at either configuration.
+- **The separation ratio is a function of configuration, not of draw -- record both bands.** At
+  batch=2/seq_len=8/20 reps: 40.3x and 42.6x across two draws, 5.7% apart. At batch=4/seq_len=128/20
+  reps: 67.6x / 69.9x / 69.8x across three draws, under 2.1% apart. Each band is tight within
+  itself; the ~1.7x gap between the two bands is a real configuration effect (batch and/or seq_len),
+  not draw noise. batch=2/seq_len=8 is the binding (narrower) configuration and the one this
+  project's break cases run at by default.
+- **`SAFETY_FACTOR=15 * GATE_MARGIN=2 = 30` is now validated against the binding configuration's
+  measured band, not a single draw.** The binding band (40.3x-42.6x) leaves ~34% headroom at its
+  narrowest (`(40.3-30)/30`) -- the budget would need enlarging by more than a third before either
+  observed draw could threaten it. This is a measured band, not a proven lower bound: a later draw
+  at this configuration could in principle land narrower than 40.3x, the same caveat the max finding
+  above carries. Two independent draws within 5.7% of each other is meaningfully stronger support
+  than the single 40.3x observation the constants were originally set against.
+  `weight_sync_bench/phase2/bf16_floor.py`'s `SAFETY_FACTOR` comment now cites this band. **Constants
+  are unchanged** -- this records that the existing split has more support than when it was chosen,
+  not a case for retuning it. Full numbers in `tolerance/phase2a_bf16_floor_v2.json`.
 - **Provenance narrowing still applies to model, dtype, and batch.** The floor is specific to
   Qwen3-0.6B and bf16; 2b must re-measure if either changes. seq_len is now measured stable across
   8-512 at batch=4 (and separately confirmed unaffected by prefix caching at batch=2), so it is no
