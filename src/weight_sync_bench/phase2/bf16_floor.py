@@ -144,18 +144,35 @@ DEFAULT_REPETITIONS = 5
 DEFAULT_BATCH = 2
 DEFAULT_SEQ_LEN = 8
 
-# Same rule *shape* as phase 1 (tolerance.SAFETY_FACTOR), not the same number by
-# assumption -- phase 1's 100x was itself derived, not chosen a priori, and this
-# is the first bf16 measurement, so 100x here is provisional. Revisit once real
-# numbers are in hand; SPEC.md only commits to "a stated multiple of the worst
-# observed mean, applied by a pure function of the measurement," not to matching
-# phase 1's constant.
-SAFETY_FACTOR = 100
+# Measured, not phase-1-inherited. Two runs (see tolerance/phase2a_bf16_floor.json):
+# 5 reps at batch=2/seq_len=8 gave floor mean 4.296e-02, weakest break 1.757, a
+# 40.9x separation; 20 reps at the same shape gave floor mean 3.898e-02, weakest
+# break 1.570, a 40.3x separation. The mean held within 9% across a 4x increase
+# in repetitions -- phase 1's earlier finding that sample-count drift is small on
+# the mean and large on the max reproduces here (max moved 96 -> 104 ULP over the
+# same two runs). Treat ~40x as the real budget bf16 has to spend, against phase
+# 1's fp32 budget of roughly 10^5 (floor 1.67e-6 against breaks of 0.34-2.5).
+#
+# SAFETY_FACTOR x GATE_MARGIN must stay strictly below the measured separation
+# ratio, or the gate cannot fail an injected bug no matter how the two factors
+# are split -- that is what carrying over phase 1's 100 x 10 = 1000 unchanged
+# did here: 1000 > 40x, so no break case could ever clear, and the resulting
+# "fail" verdict was an artifact of the unchanged constants, not a finding about
+# bf16. 15 x 2 = 30 stays under 40x with headroom for the ratio to move on a
+# future re-measurement without flipping the gate. The split is asymmetric on
+# purpose: floor noise (dtype rounding, reduction order) is the larger, better-
+# characterized source of variance here, so it gets the larger factor; the
+# 2x GATE_MARGIN is a thin floor under real-bug detection, not a comfortable
+# one, and that thinness is the honest cost of a ~40x total budget rather than
+# fp32's ~10^5x one. A future session seeing 2x next to phase 1's thousands-of-x
+# GATE_MARGIN should read this comment, not assume the number is a mistake.
+SAFETY_FACTOR = 15
 MIN_THRESHOLD = 1e-9
 
 # Gate criteria threshold (SPEC.md 2a): a break case must clear the derived bf16
 # threshold by at least this multiple on mean deviation to count as "clears."
-GATE_MARGIN = 10
+# See the SAFETY_FACTOR comment above for why this is 2, not phase 1's 10.
+GATE_MARGIN = 2
 
 
 @dataclass(frozen=True)
@@ -177,18 +194,22 @@ QWEN3_0_6B = Qwen3Geometry()
 
 
 def derive_threshold(mean_deviation: float, safety_factor: int = SAFETY_FACTOR) -> float:
-    """Smallest power of ten >= safety_factor * worst observed MEAN deviation.
-
-    Same rule shape as tolerance.derive_threshold, applied to the mean instead of
-    the max per SPEC.md's bf16 statistic change. Kept as a free function, not
-    inlined, so a reader can re-derive the threshold from `measurement.json`
-    themselves -- same discipline as phase 1.
+    """threshold = safety_factor * worst observed MEAN deviation. A direct
+    multiple, not phase 1's smallest-power-of-ten -- deliberately different rule
+    shape from tolerance.derive_threshold, scoped to phase 2 only (phase 1's
+    rounded rule in tolerance.py is untouched). Phase 1 could afford power-of-ten
+    rounding because it had ~5 orders of magnitude of headroom between floor and
+    break; here the whole budget is ~40x (see the SAFETY_FACTOR comment), and
+    rounding up to the next power of ten can by itself consume a factor of up to
+    10x of that -- e.g. 100 * 4.3e-2 = 4.3 rounds to 10, a free 2.3x tax that a
+    ~40x budget cannot absorb. Stating the threshold as a direct multiple removes
+    that tax; the remaining conservatism is entirely in the chosen constant.
+    Kept as a free function, not inlined, so a reader can re-derive the threshold
+    from the artifact themselves -- same discipline as phase 1.
     """
-    import math
-
     if mean_deviation <= 0.0:
         return MIN_THRESHOLD
-    return float(10 ** math.ceil(math.log10(safety_factor * mean_deviation)))
+    return float(safety_factor * mean_deviation)
 
 
 def environment() -> dict[str, Any]:

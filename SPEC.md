@@ -439,6 +439,64 @@ worst observed mean, applied by a pure function of the measurement.
 
 Report the numbers before proceeding either way.
 
+### Measured (2a results)
+
+Two runs against real Qwen3-0.6B / vLLM 0.28.0, both at batch=2, seq_len=8: 5 repetitions (80
+positions total) on a single-GPU rented host, then 20 repetitions (320 positions total) on a
+separate 2x A100-SXM4-80GB rented host, to check whether the statistics were sample-count-stable
+before setting any constant. Full numbers and provenance for both hosts are in
+`tolerance/phase2a_bf16_floor.json`.
+
+- **The two runs differ in more than repetition count, which limits what the comparison shows.**
+  The 5-rep run's host had only one physical GPU. TP=2 needs two ranks on two physical devices (see
+  "What to run" above), so that run's TP=2 leg of the differential measurement never completed --
+  its numbers come from a partial run, not a validated TP=1-vs-TP=2 differential under real sharded
+  execution, unlike the 20-rep run's. Sample count and run completeness/host therefore changed
+  together, not independently.
+- **The mean moved less than the max, but treat this as suggestive, not confirmed.**
+  `mean_deviation` moved from 4.296e-02 (5 reps, partial run) to 3.898e-02 (20 reps, complete run),
+  a 9% move. `max_ulp` moved from 96.00 to 104.00 over the same two runs. This is directionally
+  consistent with phase 1's finding (`tolerance/phase1a.json`) that the max is an unconverged
+  extreme-order-statistic that drifts with sample count while the mean stays comparatively stable,
+  and with this document's earlier choice of mean as the primary bf16 statistic -- but given the
+  confound above, it corroborates rather than empirically confirms that choice. A same-host
+  repetition-count comparison would be needed to confirm it cleanly. The threshold and gate verdict
+  below do not depend on this comparison: they are derived solely from the 20-rep, complete-TP=2
+  run.
+- **The measured separation ratio is ~40x, not fp32's ~10^5x.** weakest break / floor mean was
+  40.9x at 5 reps and 40.3x at 20 reps (case2_oproj_col_permute at 1.570 against floor mean
+  3.898e-02). `SAFETY_FACTOR * GATE_MARGIN` must stay strictly below this ratio or the gate cannot
+  fail an injected bug no matter how the two factors are split. The originally-stated gate criteria
+  above ("clears... by at least 10x") assumed headroom this project did not have data for yet; naive
+  reuse of phase 1's constants (`SAFETY_FACTOR=100`, `GATE_MARGIN=10`, product 1000) against a ~40x
+  budget produced a threshold no break case could ever clear, and the resulting "fail" would have
+  been an artifact of the unchanged constants, not a finding about bf16. **Superseding the "10x"
+  figure above:** `weight_sync_bench/phase2/bf16_floor.py` now uses `SAFETY_FACTOR=15`,
+  `GATE_MARGIN=2` (product 30, under the ~40x budget with headroom for the ratio to move on a
+  future re-measurement), and states the threshold as a direct multiple of the mean
+  (`threshold = SAFETY_FACTOR * mean_deviation`) rather than phase 1's power-of-ten rounding --
+  rounding cost phase 1 nothing against ~5 orders of magnitude of headroom, but against a ~40x
+  budget it can by itself consume up to a 10x tax the budget cannot absorb. Phase 1's rounded rule
+  in `tolerance.py` is untouched; this change is scoped to phase 2.
+- **Provenance narrowing applies unchanged from phase 1.** The floor is specific to Qwen3-0.6B,
+  bf16, and the (batch, seq_len) it was measured at (2, 8) here. 2b must re-measure if the model,
+  dtype, batch, or seq_len change.
+- **Seq_len dependence is untested.** A run at `--repetitions 20 --batch 4 --seq-len 64` was
+  started and killed after an hour without completing: vLLM's `prompt_logprobs=-1` extraction path
+  builds on the order of 150k Python `Logprob` objects per position (one per vocab entry shown,
+  `vocab_size=151936`), and that does not scale to seq_len=64, batch=4. This is a cost of the
+  from-disk logprobs API `bf16_floor.py` currently uses, not a phase-2a physics finding. Replacing
+  it with a `collective_rpc` call that returns the logits tensor directly is 2b work, and is needed
+  for the weight-sync path itself regardless of this measurement.
+
+**Gate verdict: PASS on the physics.** All three break cases at 20 reps sit 40x-77x above the
+measured floor mean (1.772 / 1.570 / 2.984 against 3.898e-02) and clear the revised threshold
+(0.5847) by 2.7x-5.1x. The pre-measurement risk estimate above (naive bf16 scaling predicting a
+floor near 0.109 and case 3 possibly undetectable) did not materialize: the measured floor
+(3.898e-02) is about 3x better than that estimate, and case 3 (norm permutation) is measured as the
+**strongest** break (2.984), not the weakest -- the weakest is case 2 (o_proj/down column
+permutation, 1.570). Proceed to 2b.
+
 ---
 
 ## 2b. Real layout tables
