@@ -1092,7 +1092,13 @@ floor that inherits that calibration inherits the limitation with it, so the sep
 reported at layer 0 and at a layer in the 7 to 27 band, and the served gate states which of the
 two it holds at. And the floor artifact records the weight-broadcast transport the server ran
 under, because the transport selects the worker class each engine is built from, and a floor
-whose transport is unrecorded cannot be compared against a run on a different one.
+whose transport is unrecorded cannot be compared against a run on a different one. The third
+condition is about the weights: each leg records the checkpoint the server actually served, read
+back off the server, and the assembly checks it against the checkpoint that leg was meant to
+serve. Two engines loaded from different checkpoints differ by roughly the amount a layout bug
+does, so an unrecorded checkpoint makes a floor indistinguishable from a weights difference
+wearing a boundary's name, and makes a break case that never loaded its corruption
+indistinguishable from a break case that failed to separate.
 
 The attachment question is resolved, so 2c through 2e are unblocked on design. The serving-boundary
 floor is what stands between them and a gate, and it is a measurement rather than a decision.
