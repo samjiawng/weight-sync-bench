@@ -1,0 +1,40 @@
+Subject: honor a caller-supplied worker_extension_cls
+
+Applies to: prime-rl 26b3131d2716a4f8210b165df584b83b4bc54f61 (tag v0.9.1.dev41)
+Apply with: patch -p1 < 01-worker-extension-passthrough.patch
+Touches: src/prime_rl/inference/vllm/server.py, one hunk, function `server()`
+
+WHAT AND WHY
+`server()` sets `args.worker_extension_cls` unconditionally from
+WORKER_EXTENSION_CLS, keyed by the configured weight-broadcast transport. The
+vLLM config section is `extra="allow"` and `to_namespace()` copies every field
+and extra onto the namespace, so a caller-supplied value DOES reach `args` --
+and this assignment is the single place it is then discarded. Making the
+assignment conditional is what lets a class that SUBCLASSES the transport's own
+worker be substituted, which is how the weight-update RPCs the RL loop depends
+on stay intact while a logits hook is mixed in.
+
+Not required when the inference server is started through this project's own
+launcher (`weight_sync_bench.phase3.attach`), which rebinds the dict in-process
+before `server()` reads it. It IS required when prime-rl's own orchestration
+spawns the inference process, because an in-process rebind does not reach it.
+
+--- a/src/prime_rl/inference/vllm/server.py
++++ b/src/prime_rl/inference/vllm/server.py
+@@ -229,8 +229,14 @@
+     assert args is not None
+     validate_parsed_serve_args(args)
+ 
+-    # Set the worker extension class based on the broadcast backend
+-    args.worker_extension_cls = WORKER_EXTENSION_CLS[config.weight_broadcast.type]
++    # Set the worker extension class based on the broadcast backend, unless one
++    # was already supplied through the vLLM config passthrough. Every other
++    # field in that section survives to the engine; this was the one exception,
++    # so a caller-supplied value reached the namespace and was then discarded.
++    # Honoring it lets a worker extension that SUBCLASSES the transport's own
++    # worker be substituted, which keeps the weight-update RPCs intact.
++    if getattr(args, "worker_extension_cls", None) is None:
++        args.worker_extension_cls = WORKER_EXTENSION_CLS[config.weight_broadcast.type]
+ 
+     if args.headless or args.api_server_count < 1:
+         run_headless(args)

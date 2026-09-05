@@ -51,3 +51,8 @@ testpaths = ["tests"]
 filterwarnings = [
     "always::weight_sync_bench.tolerance.EnvironmentMismatch",
 ]
+markers = [
+    # Reaches the network to fetch the pinned prime-rl tree; skips itself when
+    # that is unavailable, so a clone with no network still runs green.
+    "slow: fetches a remote tarball",
+]

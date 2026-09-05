@@ -217,10 +217,37 @@ def compose_worker_extension(broadcast_type: str = DEFAULT_BROADCAST_TYPE) -> ty
     from ..phase2.collective_logits import LogitsHookWorkerExtension
 
     base = resolve_obj_by_qualname(PRIME_RL_WORKER_EXTENSIONS[broadcast_type])
+
+    def get_scheduler_config_summary(self) -> dict[str, Any]:
+        """The engine flags that decide whether extraction can work, read from
+        inside a worker.
+
+        Added here rather than as a third patch to prime-rl: it is a method on
+        the composed class, which this project already owns. It exists because
+        check 0 has to confirm chunked prefill and prefix caching are actually
+        off by reading the RESOLVED config -- a flag that silently failed to
+        apply is indistinguishable from one that applied until extraction
+        raises.
+        """
+        from vllm.config import get_current_vllm_config
+
+        config = getattr(self, "vllm_config", None) or get_current_vllm_config()
+        scheduler = config.scheduler_config
+        cache = getattr(config, "cache_config", None)
+        return {
+            "max_num_batched_tokens": getattr(scheduler, "max_num_batched_tokens", None),
+            "chunked_prefill_enabled": getattr(scheduler, "chunked_prefill_enabled", None),
+            "enable_prefix_caching": getattr(cache, "enable_prefix_caching", None),
+        }
+
     # LogitsHookWorkerExtension first: its methods are the ones being added, and
     # neither class defines a name the other does, so the MRO order is about
     # intent rather than resolution.
-    composed = type(COMPOSED_WORKER_NAME, (LogitsHookWorkerExtension, base), {})
+    composed = type(
+        COMPOSED_WORKER_NAME,
+        (LogitsHookWorkerExtension, base),
+        {"get_scheduler_config_summary": get_scheduler_config_summary},
+    )
     # vLLM resolves the extension by qualname in each worker process, which
     # means `getattr(this_module, COMPOSED_WORKER_NAME)` has to return this
     # class. Bind it so the module-level __getattr__ below finds it.
@@ -300,15 +327,29 @@ def scheduler_evidence(llm: Any, prompt_len: int) -> dict[str, Any]:
     probe reporting agreement from an unchunked run -- the same class of error
     as a flag that is accepted and then never read.
     """
+    scheduler = llm.llm_engine.vllm_config.scheduler_config
+    return evidence_from_scheduler(
+        getattr(scheduler, "max_num_batched_tokens", None),
+        getattr(scheduler, "chunked_prefill_enabled", None),
+        prompt_len,
+    )
+
+
+def evidence_from_scheduler(
+    budget: int | None, chunked_prefill_enabled: Any, prompt_len: int
+) -> dict[str, Any]:
+    """The chunking prediction, as a pure function of resolved config values.
+
+    Split out from `scheduler_evidence` so a server reached over HTTP and an
+    in-process engine share ONE implementation of the check rather than growing
+    a second one that can disagree with it.
+    """
     import math
 
-    scheduler = llm.llm_engine.vllm_config.scheduler_config
-    budget = getattr(scheduler, "max_num_batched_tokens", None)
-    enabled = getattr(scheduler, "chunked_prefill_enabled", None)
-    will_chunk = bool(enabled) and budget is not None and budget < prompt_len
+    will_chunk = bool(chunked_prefill_enabled) and budget is not None and budget < prompt_len
     return {
         "resolved_max_num_batched_tokens": budget,
-        "resolved_chunked_prefill_enabled": enabled,
+        "resolved_chunked_prefill_enabled": chunked_prefill_enabled,
         "prompt_len": prompt_len,
         "budget_below_prompt_len": budget is not None and budget < prompt_len,
         "expected_chunks": math.ceil(prompt_len / budget) if budget else None,

@@ -1,0 +1,94 @@
+Subject: add a route forwarding four allowlisted collective_rpc methods
+
+Applies to: prime-rl 26b3131d2716a4f8210b165df584b83b4bc54f61 (tag v0.9.1.dev41)
+Apply with: patch -p1 < 02-collective-rpc-route.patch
+Touches: src/prime_rl/inference/vllm/server.py, one hunk, adds
+         FORWARDABLE_RPC_METHODS, `_encode_rpc_result`, and the
+         `/collective_rpc` route
+
+WHAT AND WHY
+prime-rl exposes collective_rpc over HTTP at three routes (/update_weights,
+/liveness, /init_broadcaster) and each hardcodes one method name, so none of
+them can reach a method added by a worker extension. Extraction needs to call
+`install_logits_hook` and `retrieve_and_clear_logits` on the workers; without a
+forwarding route there is no path to either.
+
+Bytes are the reason for the encoder: `retrieve_and_clear_logits` returns a
+(dtype, shape, raw bytes) triple, and JSON cannot carry the third element. It is
+base64-encoded under a `__bytes_b64__` key so the client can distinguish an
+encoded blob from an ordinary list.
+
+WHAT IS FORWARDED
+Exactly the four methods in FORWARDABLE_RPC_METHODS: install_logits_hook,
+retrieve_and_clear_logits, uninstall_logits_hook, get_scheduler_config_summary.
+Anything else is refused with HTTP 400 naming what is allowed. The route is a
+seam for logit extraction, not general worker access, and the allowlist is what
+makes that true in the code rather than only in this header. It is also
+continuous with the file it lands in: the three routes above each name one
+method, and this one names four.
+
+`JSONResponse` is already imported by this module, so the refusal adds no import.
+--- a/src/prime_rl/inference/vllm/server.py
++++ b/src/prime_rl/inference/vllm/server.py
+@@ -147,6 +147,61 @@
+     return {"status": "ok"}
+ 
+ 
++# The only worker methods /collective_rpc will forward. The three routes above
++# each name exactly one method; this names four rather than accepting any, so
++# the route stays a seam for logit extraction instead of general worker access.
++FORWARDABLE_RPC_METHODS = frozenset(
++    {
++        "install_logits_hook",
++        "retrieve_and_clear_logits",
++        "uninstall_logits_hook",
++        "get_scheduler_config_summary",
++    }
++)
++
++
++def _encode_rpc_result(value):
++    """JSON-safe form of one rank's collective_rpc return value.
++
++    Raw bytes are the reason this exists: a worker extension that returns tensor
++    data returns it as bytes, and JSON cannot carry those. Encoded as base64
++    with a tagged wrapper so the client can tell an encoded blob from a list.
++    """
++    import base64
++
++    if isinstance(value, bytes):
++        return {"__bytes_b64__": base64.b64encode(value).decode("ascii")}
++    if isinstance(value, (list, tuple)):
++        return [_encode_rpc_result(item) for item in value]
++    if isinstance(value, dict):
++        return {key: _encode_rpc_result(item) for key, item in value.items()}
++    return value
++
++
++@router.post("/collective_rpc")
++async def collective_rpc(request: Request):
++    """Forward one allowlisted collective_rpc call to the workers.
++
++    The three routes above each hardcode a single method name, so none of them
++    reaches a method added by a worker extension. This forwards any of the four
++    in FORWARDABLE_RPC_METHODS and refuses everything else.
++    """
++    data = await request.json()
++    method = data["method"]
++    if method not in FORWARDABLE_RPC_METHODS:
++        return JSONResponse(
++            {
++                "error": f"method {method!r} is not forwardable",
++                "allowed": sorted(FORWARDABLE_RPC_METHODS),
++            },
++            status_code=400,
++        )
++    args = tuple(data.get("args", []))
++    timeout = data.get("timeout")
++    results = await engine_client(request).collective_rpc(method, timeout=timeout, args=args)
++    return {"results": [_encode_rpc_result(result) for result in results]}
++
++
+ async def custom_init_app_state(
+     engine_client: EngineClient,
+     state: State,
