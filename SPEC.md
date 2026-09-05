@@ -307,6 +307,27 @@ be in the README rather than only in the code.
 
 # Phase 2 spec: weight-sync latency against vLLM
 
+## Status
+
+- **2a met.** bf16 floor measured differentially against real Qwen3-0.6B on vLLM 0.28.0, gate
+  verdict PASS, reproduced through a second extraction path. `tolerance/phase2a_bf16_floor.json`,
+  `tolerance/phase2a_bf16_floor_v2.json`.
+- **2b met.** A real `LayoutTable` for Qwen3-0.6B at TP in {1, 2, 4}, validated by shape
+  prediction (227/227 parameter names) and bit-exact content prediction against vLLM's post-load
+  tensors. `tolerance/phase2b_layout.json`.
+- **2c, 2d, 2e pending, and deliberately waiting.** They are not blocked on anything 2a or 2b
+  left unfinished. They wait because all three are built against a specific engine construction,
+  and which construction is not yet settled. 2a and 2b constructed the vLLM engine directly, in
+  this repo, with `worker_extension_cls` set so that `collective_logits.run_one_prompt` could
+  reach the raw logits tensor. The real runs target prime-rl, which constructs its own engine.
+  If prime-rl's construction does not admit that extension, the correctness gate every 2e timing
+  depends on cannot run inside a prime-rl loop, and 2c through 2e would be built against an
+  engine that cannot certify them. An engine-construction probe settles this before any of the
+  three is built. See phase 3's build order.
+- Break-case reinjection through the real vLLM load path is tracked as an open question, not as
+  a 2b deliverable; the layout table is validated by the two prediction checks above.
+
+
 ## What carries over
 
 `LayoutTable`, the `Placement` sum type, `reshard.py`, and the discipline of measuring the
@@ -753,9 +774,9 @@ A100-SXM4-80GB box at TP in {1, 2, 4} (`tolerance/phase2b_layout.json`) -- shape
 (227/227 real parameter names matched `CheckpointGeometry`'s predicted per-rank shape exactly, at
 every degree) and content prediction (`reshard.split_tensor` -- this repo's own resharder, not a
 parallel formula -- applied to the real TP=1 tensor reproduced the real TP=2/TP=4 rank-local
-tensor bit-exactly, `torch.equal`, for `qkv_proj` and `gate_up_proj`, at every rank). What remains
-for phase 2b is break-case reinjection through the real vLLM load path (see below); the
-layout-table deliverable itself needs no further work.
+tensor bit-exactly, `torch.equal`, for `qkv_proj` and `gate_up_proj`, at every rank). Break-case reinjection through
+the real vLLM load path (see below) is tracked separately as an open question; the layout-table
+deliverable itself is met and needs no further work.
 
 **Two findings from 2a prep, confirmed against the real Qwen3-0.6B checkpoint (config.json and
 the safetensors header, not assumed), that change what 2b is:**
@@ -905,3 +926,172 @@ cover this; apply with 2a results in hand rather than as a proposal.
 Do not rent 8 GPUs before 2a resolves. Do not build transports before 2b validates a real layout
 table. The single most common failure in this genre is building the measurement apparatus before
 confirming the thing being measured can be measured.
+
+---
+
+# Phase 3 spec: staleness against a real asynchronous loop
+
+## Goal
+
+Measure how sampler staleness trades against rollout throughput in a real asynchronous RL
+post-training loop, with phase 2's decomposed `T_sync` as the instrument.
+
+Staleness is the number of optimizer steps by which a sampler's weights lag the trainer's. It is
+the parameter every asynchronous RL system sets and almost none reports the cost of. Phase 2
+measures what one sync costs. Phase 3 measures what buying fewer of them is worth: as staleness
+increases, sync frequency falls and sampler GPU idle time falls with it, while the rollouts a
+sampler produces are drawn from an increasingly out-of-date policy. The deliverable is the
+throughput side of that trade, measured, with the correctness side gated rather than assumed.
+
+The engine is prime-rl at a pinned commit, running vLLM. Phases 1 and 2 built their own
+consumers precisely so this phase could stop doing that and measure a system someone actually
+runs.
+
+## What it consumes from phase 2
+
+- **2c through 2e as instrumentation.** The per-sync record (`t_reshard`, `t_transfer`, `t_load`,
+  sampler idle time), the p50/p99 discipline over at least 100 syncs, and the transport set.
+  Phase 3 varies staleness and reads those same fields; it does not define new ones.
+- **The 2a threshold as the correctness gate.** Every phase 3 timing is gated by the same mean
+  absolute deviation threshold, `SAFETY_FACTOR * mean_deviation` with `SAFETY_FACTOR = 15`, and
+  by the same differential design that produced it. A staleness measurement on a loop that is
+  delivering wrong weights measures nothing. The threshold's provenance narrowing carries over
+  unchanged: it is specific to Qwen3-0.6B, bf16, and the vLLM version it was measured at, and it
+  must be re-measured if any of those change.
+- **2b's `LayoutTable`** for the TP degrees the sweep uses, and `reshard.py` underneath it.
+
+## What phase 3 changes about the trainer
+
+2c's minimal trainer is a parameter holder that mutates weights with noise, which is correct for
+measuring sync cost and useless for measuring staleness: staleness is defined against optimizer
+steps, and a loop that never computes a gradient has no steps to lag behind. Phase 3 therefore
+runs prime-rl's real trainer and its real loop. This is the one place where the deliberate
+absence of an RL loop in phases 1 and 2 ends.
+
+It does not follow that phase 3 measures learning. See non-goals.
+
+## Non-goals
+
+- **No claim about learning quality.** No reward curves, no comparison of final task performance
+  across staleness settings, no statement about which staleness value trains better. Those
+  require many full runs to separate signal from seed variance and are a different project. Phase
+  3 reports throughput, idle time, and sync cost against staleness, and stops there.
+- No new transport implementations beyond whatever phase 2d settles on.
+- No environment or verifier authoring. An existing small task is used as a load generator.
+- No multi-node.
+- No model beyond the sizes phase 2e already swept.
+
+## Build order
+
+Three stages, in order. Each gates the next.
+
+### 3a. Engine-construction probe
+
+The correctness gate reaches raw logits through a vLLM worker extension
+(`collective_logits.py`), which requires the engine to be constructed with
+`worker_extension_cls` set. Phases 2a and 2b constructed that engine themselves. prime-rl
+constructs its own. Whether prime-rl's construction accepts that argument, forwards it, or drops
+it decides whether the gate can run inside a prime-rl loop at all, and it is cheap to answer:
+read the engine construction at the pinned commit, then check bit-identity of the extracted
+logits tensor against the same extraction from a directly-constructed engine at the same
+checkpoint and flags.
+
+**RESOLVED by source read, and the answer is that it does not attach.** At the pinned commit
+prime-rl constructs no in-process `LLM` object at all: its only engine construction ends in
+vLLM's OpenAI API server, and the engine is reachable only as an `EngineClient` from inside
+request handlers. The extraction path calls `collective_rpc` and `generate` on a local object,
+so it does not attach as written, and prime-rl's HTTP surface exposes `collective_rpc` only
+through routes that each hardcode one RPC method name. A caller-supplied `worker_extension_cls`
+is separately dropped: prime-rl's config forwards it onto the argparse namespace, and the server
+entry point then overwrites it unconditionally from a module-level dict keyed by the
+weight-broadcast transport, before the plugin hook that might otherwise have intervened runs.
+
+The seam is that dict. It is mutable and read at call time, so a launcher can rebind the
+configured transport's entry to a class subclassing both prime-rl's weight-update worker and the
+logits-hook extension, then start the server. Composition by subclassing is forced, since the
+field names exactly one class. The alternative, making prime-rl's overwrite conditional, is one
+line but has to be carried as a patch against a pinned third party. Exercising the launcher
+against a running server is the remaining feasibility question.
+
+What is still worth measuring on a GPU is narrower and separable: whether prime-rl's engine
+flags change the logits the correctness gate reads. prime-rl leaves chunked prefill and prefix
+caching at vLLM's defaults, both on, where the floor was measured with both off, and runs with
+cuda graphs where the floor enforced eager execution. Two constraints on that comparison, both
+consequences of what those flags do:
+
+- **Compare under the 2a threshold, not bit-identity.** Chunked prefill changes how prefill
+  attention accumulates and cuda-graph capture can change kernel and padding choices, so a
+  correct engine is under no obligation to return identical bits across these profiles.
+  Bit-identity is the right check only between engines whose flags match, which is where phase
+  2b's extraction check earned it.
+- **The prompt must be long enough to actually chunk.** Below vLLM's batched-token budget,
+  chunked prefill never chunks, and a comparison at a short prompt reports agreement while
+  leaving the first suspect flag unexercised. Force chunking by lowering the batched-token
+  budget on that leg or by raising the prompt past it.
+
+The probe also establishes the hardware floor for everything after it. prime-rl separates trainer
+and inference into distinct processes with distinct GPUs, so its smallest end-to-end loop is one
+trainer GPU plus one inference GPU. There is no single-GPU end-to-end configuration.
+
+Nothing in 2c through 2e is built until this resolves.
+
+### 3b. 2c through 2e, against the engine the probe validated
+
+Phase 2's remaining deliverables, built once and against a settled engine construction rather
+than twice.
+
+**Settled: 2d wraps prime-rl's own transports rather than reimplementing them.** prime-rl
+implements filesystem, NCCL, and NIXL weight transports plus a worker-side transfer path, and
+those are what people actually run; a reimplementation would produce numbers about code nobody
+uses. 2d therefore implements the phase 1 `Transport` protocol over them. Three consequences
+follow and none of them is optional.
+
+- **Stage decomposition comes from instrumentation.** Splitting `T_sync` into `T_reshard`,
+  `T_transfer`, and `T_load` needs timing points the transports do not expose. Add them as a
+  small patch to the pinned checkout, carried in this repo as a recorded diff applied at setup
+  time, never as a vendored copy and never as a fork. A patch that grows past timing points is
+  evidence the wrapping is failing for that transport, and is reported rather than absorbed.
+- **A transport whose stages cannot be separated without restructuring reports its total only,**
+  with the reason recorded beside the number. An invented decomposition would sit in the same
+  fields as three measured ones and read as comparable to them, which is worse than an honest
+  total.
+- **CUDA IPC is replaced by NIXL, and the substitution is a finding, not a renumbering.** CUDA
+  IPC shares device memory handles and so requires trainer and sampler resident on the same
+  GPUs. prime-rl places them on disjoint GPU sets, so at the pinned commit there is no
+  configuration in which a CUDA-IPC transport could run at all. NIXL occupies that slot. Report
+  the substitution with the colocation reason; do not present the transport list as though the
+  originally specified three had been built.
+
+### 3c. The staleness sweep
+
+Vary staleness across a stated range at fixed model, transport, and parallelism, then repeat at
+the transport and TP degree that phase 2e identified as most and least favorable. Record rollout
+throughput, sampler GPU idle time, and the full per-sync decomposition at every point, with the
+correctness gate passing at every point that produced a recorded number.
+
+## Pinning
+
+prime-rl moves fast and vLLM's weight-loading surface has churned repeatedly. Pin prime-rl to an
+exact commit SHA, chosen so that its resolved vLLM version matches the one the bf16 floor was
+measured at. Record the SHA in `pyproject.toml` and in every artifact this phase writes, next to
+the vLLM version, not in place of it.
+
+If a later pin moves prime-rl to a different vLLM version, the floor is re-measured at that
+version and the threshold re-derived before any timing is recorded. Reusing a threshold across
+vLLM versions is the same error as reusing phase 1a's threshold for 1b: reduction order is not
+guaranteed stable across versions, and the floor is a measurement, not a constant.
+
+## Acceptance criteria
+
+- Engine construction resolved: the extracted logits tensor is bit-identical between the pinned
+  prime-rl engine and a directly-constructed one at matched flags, or the divergence is
+  attributed to a named cause and the gate's status inside a prime-rl loop is stated explicitly.
+- prime-rl pinned to an exact SHA, recorded in `pyproject.toml` and in every artifact, with the
+  resolved vLLM version recorded alongside it.
+- 2c through 2e met against that engine.
+- Rollout throughput and sampler GPU idle time reported against staleness, p50 and p99 over at
+  least 100 syncs per point, first 10 discarded as warmup and said so.
+- The correctness gate passes at every configuration that produced a recorded timing, at the 2a
+  threshold, re-measured if the model, dtype, or vLLM version changed.
+- The point at which further reduction in sync cost stops improving rollout throughput,
+  identified and stated, or stated as not reached within the range swept.
