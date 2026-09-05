@@ -1,0 +1,3211 @@
+{
+  "phase": "2c",
+  "probe": "how many skipped optimizer steps the correctness gate resolves",
+  "note": [
+    "WHAT IS MEASURED: the smallest number of optimizer steps a null sync must skip before phase 1a's correctness gate fires on it. A null sync is a transport that delivered nothing, so the sampler still holds params_0 while the source has advanced to params_k.",
+    "THE REFERENCE IS THE INTENDED STATE, never the source's current state. Deliberately stale weights and a broken transport are the same bytes; phase 3 needs the gate quiet on the first and 2e needs it loud on the second, and only this choice of reference gives both.",
+    "THE STATISTIC IS THE MAXIMUM absolute logit error, because phase 1a's threshold was derived under the maximum. The threshold is READ from tolerance/phase1a.json and is neither re-derived nor inlined here.",
+    "THE GATE FIRES when the null deviation exceeds MIN_SEPARATION * threshold, which is the same bar the break cases must clear. A null sync that merely exceeded the threshold would be indistinguishable from a tolerance set slightly too tight.",
+    "SAME INPUT-DEPENDENCE AS PHASE 1a. The deviations are maxima over batch * seq_len * vocab elements, so d_model, n_layers, batch and seq_len all move them. The geometry and token shape are recorded and checked against the running values, and this artifact must be regenerated if any of them changes.",
+    "THE SOURCE LAYOUT IS A CONTROL, not a swept axis: a step adds noise elementwise and split/gather is byte-exact, so the intended state cannot depend on how the source held it. Recorded at the reference magnitude instead, including a storage source at a degree where no execution table exists.",
+    "NOT AN RL RESULT. There is no optimizer, gradient or loss here. A step is modelled as noise scaled relative to each parameter's RMS, because the only property of a training step this question depends on is that the weights move by a small amount per step."
+  ],
+  "outcome": "gate_resolves_k_or_more_consecutive_missed_syncs",
+  "consequence_for_2e": "AT THE REFERENCE MAGNITUDE THE GATE DOES NOT RESOLVE A NULL SYNC within any practical number of steps. It does not fire by k=8 in the linear sweep, and the measured growth (deviation ~ k ** ~0.5, a random walk) puts the crossing near k~34316 to 38353 skipped steps, EXTRAPOLATED. A single missed sync at this magnitude does not even exceed the bare phase 1a threshold, let alone MIN_SEPARATION times it. 2e therefore cannot claim its per-sync gate protects a recorded timing against a transport that delivered nothing: the gate catches gross corruption, which is what the break cases inject, and not a silent no-op. Catching a no-op needs a different check -- comparing the delivered bytes against the intended state directly rather than through the logits -- which is a 2d/2e design consequence and not a number to tune here.",
+  "reference_magnitude": {
+    "value": 0.0001,
+    "extrapolated": true,
+    "reasoning": "An Adam update has magnitude roughly the learning rate per element, since the update is the normalized moment ratio scaled by lr. At lr 1e-5 against toy weights whose RMS is about 1/sqrt(d_model), the per-step change relative to the weight scale is order 1e-4. EXTRAPOLATED from that arithmetic, not measured from a training run: no optimizer, gradient or loss exists in this harness, and inventing one to produce this number would be a larger change than the question warrants. Treat it as the place on the swept axis a real run is expected to sit, not as a measurement.",
+    "smallest_detectable_k": [
+      {
+        "config": "kv2",
+        "dst_degree": 1,
+        "magnitude": 0.0001,
+        "smallest_detectable_k": null
+      },
+      {
+        "config": "kv2",
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "smallest_detectable_k": null
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 1,
+        "magnitude": 0.0001,
+        "smallest_detectable_k": null
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "smallest_detectable_k": null
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "smallest_detectable_k": null
+      }
+    ]
+  },
+  "gate": {
+    "threshold": 0.001,
+    "threshold_source": "tolerance/phase1a.json",
+    "threshold_is": "read from phase 1a, never re-derived here. It was derived under the MAXIMUM absolute logit error, which is why the statistic below is the maximum.",
+    "min_separation": 100.0,
+    "fires_above": 0.1,
+    "statistic": "max absolute logit error"
+  },
+  "reference_state_rule": "Every deviation is measured against the state the sync was INTENDED to deliver (the source's state after k steps), never against the source's current state and never against what the sampler holds. Deliberately stale weights and a broken transport are the same bytes; this is the only reference under which phase 3's staleness passes and 2e's null transport fails.",
+  "sweep": {
+    "configs": {
+      "kv2": {
+        "d_model": 256,
+        "n_layers": 4,
+        "n_heads": 8,
+        "n_kv_heads": 2,
+        "head_dim": 32,
+        "ffn": 704,
+        "vocab": 32000,
+        "norm_eps": 1e-06
+      },
+      "kv4": {
+        "d_model": 256,
+        "n_layers": 4,
+        "n_heads": 8,
+        "n_kv_heads": 4,
+        "head_dim": 32,
+        "ffn": 704,
+        "vocab": 32000,
+        "norm_eps": 1e-06
+      }
+    },
+    "magnitudes": [
+      1e-06,
+      1e-05,
+      0.0001,
+      0.001,
+      0.01,
+      0.1
+    ],
+    "k_max": 8,
+    "batch": 2,
+    "seq_len": 16,
+    "model_seed": 0,
+    "token_seed": 20000,
+    "source_seed": 7,
+    "torch_num_threads": 1,
+    "step_model": "noise per parameter, drawn at the parameter's full shape and split under the source's own layout, scaled by magnitude times that parameter's RMS at construction. Relative scaling so one magnitude means the same thing for an embedding and a norm weight; full-shape draw so a replicated parameter receives identical noise on every rank."
+  },
+  "resolution": [
+    {
+      "config": "kv2",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv2",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv2",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv2",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv2",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "smallest_detectable_k": 3
+    },
+    {
+      "config": "kv2",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "smallest_detectable_k": 1
+    },
+    {
+      "config": "kv2",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv2",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv2",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv2",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv2",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "smallest_detectable_k": 3
+    },
+    {
+      "config": "kv2",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "smallest_detectable_k": 1
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "smallest_detectable_k": 3
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "smallest_detectable_k": 1
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "smallest_detectable_k": 3
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "smallest_detectable_k": 1
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 4,
+      "magnitude": 1e-06,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 4,
+      "magnitude": 1e-05,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 4,
+      "magnitude": 0.0001,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 4,
+      "magnitude": 0.001,
+      "smallest_detectable_k": null
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 4,
+      "magnitude": 0.01,
+      "smallest_detectable_k": 3
+    },
+    {
+      "config": "kv4",
+      "dst_degree": 4,
+      "magnitude": 0.1,
+      "smallest_detectable_k": 1
+    }
+  ],
+  "source_layout_control": {
+    "why": "A step adds noise elementwise and split/gather is byte-exact, so the intended state cannot depend on the source's layout. Recorded rather than assumed: identical digests across layouts are the evidence. Includes a storage source at degree 4, where kv2 has no execution table at all.",
+    "rows": [
+      {
+        "config": "kv2",
+        "source_layout": "storage@t4",
+        "source_role": "storage",
+        "source_tp_degree": 4,
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 8,
+        "null_max_deviation": 0.0017430633306503296,
+        "intended_state_digest": "a10784c5b2a853aa0f7ca3806789bc1a823f3ede15bac58b6017acc99a4c9a2e"
+      },
+      {
+        "config": "kv2",
+        "source_layout": "storage@t2",
+        "source_role": "storage",
+        "source_tp_degree": 2,
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 8,
+        "null_max_deviation": 0.0017430633306503296,
+        "intended_state_digest": "a10784c5b2a853aa0f7ca3806789bc1a823f3ede15bac58b6017acc99a4c9a2e"
+      },
+      {
+        "config": "kv2",
+        "source_layout": "execution@t2",
+        "source_role": "execution",
+        "source_tp_degree": 2,
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 8,
+        "null_max_deviation": 0.0017430633306503296,
+        "intended_state_digest": "a10784c5b2a853aa0f7ca3806789bc1a823f3ede15bac58b6017acc99a4c9a2e"
+      },
+      {
+        "config": "kv4",
+        "source_layout": "storage@t4",
+        "source_role": "storage",
+        "source_tp_degree": 4,
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 8,
+        "null_max_deviation": 0.0017711520195007324,
+        "intended_state_digest": "a8ff98026067454f952565f6b8016efa1e937fa9b08aba46a52700c703a57e42"
+      },
+      {
+        "config": "kv4",
+        "source_layout": "storage@t2",
+        "source_role": "storage",
+        "source_tp_degree": 2,
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 8,
+        "null_max_deviation": 0.0017711520195007324,
+        "intended_state_digest": "a8ff98026067454f952565f6b8016efa1e937fa9b08aba46a52700c703a57e42"
+      },
+      {
+        "config": "kv4",
+        "source_layout": "execution@t2",
+        "source_role": "execution",
+        "source_tp_degree": 2,
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 8,
+        "null_max_deviation": 0.0017711520195007324,
+        "intended_state_digest": "a8ff98026067454f952565f6b8016efa1e937fa9b08aba46a52700c703a57e42"
+      }
+    ]
+  },
+  "growth_at_reference_magnitude": {
+    "why": "The linear grid shows the gate does not fire at the reference magnitude within k_max. This says how far outside the boundary is, which is the number 2e needs; 'did not fire' alone does not distinguish a boundary at k=10 from one at k=10000.",
+    "k_values": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64,
+      128,
+      256
+    ],
+    "summary": [
+      {
+        "config": "kv2",
+        "measured_exponent_in_k": 0.48745079549802,
+        "exponent_reading": "the null deviation grows roughly as k ** exponent. Near 0.5 is a random walk: k skipped steps accumulate independent updates, so the displacement grows as sqrt(k) while the gate is a fixed absolute bar. Buying one decade of deviation therefore costs a hundredfold increase in k.",
+        "largest_k_measured": 256,
+        "null_max_deviation_at_largest_k": 0.009184777736663818,
+        "gate_fired_within_measured_range": null,
+        "extrapolated_k_to_fire": 34315.73758204169,
+        "extrapolated": true,
+        "extrapolation_is": "the crossing point implied by the measured exponent, NOT a measurement. It is reported because sweeping k that far is not worth the compute and because the order of magnitude is what 2e needs; treat the digits as indicative."
+      },
+      {
+        "config": "kv4",
+        "measured_exponent_in_k": 0.47207752740977377,
+        "exponent_reading": "the null deviation grows roughly as k ** exponent. Near 0.5 is a random walk: k skipped steps accumulate independent updates, so the displacement grows as sqrt(k) while the gate is a fixed absolute bar. Buying one decade of deviation therefore costs a hundredfold increase in k.",
+        "largest_k_measured": 256,
+        "null_max_deviation_at_largest_k": 0.009396523237228394,
+        "gate_fired_within_measured_range": null,
+        "extrapolated_k_to_fire": 38353.021954886186,
+        "extrapolated": true,
+        "extrapolation_is": "the crossing point implied by the measured exponent, NOT a measurement. It is reported because sweeping k that far is not worth the compute and because the order of magnitude is what 2e needs; treat the digits as indicative."
+      }
+    ],
+    "rows": [
+      {
+        "config": "kv2",
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 1,
+        "null_max_deviation": 0.0006154179573059082,
+        "exceeds_threshold": false,
+        "gate_fires": false
+      },
+      {
+        "config": "kv2",
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 2,
+        "null_max_deviation": 0.0008611977100372314,
+        "exceeds_threshold": false,
+        "gate_fires": false
+      },
+      {
+        "config": "kv2",
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 4,
+        "null_max_deviation": 0.0013709068298339844,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv2",
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 8,
+        "null_max_deviation": 0.0017430633306503296,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv2",
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 16,
+        "null_max_deviation": 0.0023502707481384277,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv2",
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 32,
+        "null_max_deviation": 0.00409504771232605,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv2",
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 64,
+        "null_max_deviation": 0.005573153495788574,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv2",
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 128,
+        "null_max_deviation": 0.00805271789431572,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv2",
+        "dst_degree": 2,
+        "magnitude": 0.0001,
+        "skipped_steps": 256,
+        "null_max_deviation": 0.009184777736663818,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 1,
+        "null_max_deviation": 0.0006856322288513184,
+        "exceeds_threshold": false,
+        "gate_fires": false
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 2,
+        "null_max_deviation": 0.0008571743965148926,
+        "exceeds_threshold": false,
+        "gate_fires": false
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 4,
+        "null_max_deviation": 0.0013252943754196167,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 8,
+        "null_max_deviation": 0.0017711520195007324,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 16,
+        "null_max_deviation": 0.0023193955421447754,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 32,
+        "null_max_deviation": 0.003796219825744629,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 64,
+        "null_max_deviation": 0.0045626163482666016,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 128,
+        "null_max_deviation": 0.006553187966346741,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      },
+      {
+        "config": "kv4",
+        "dst_degree": 4,
+        "magnitude": 0.0001,
+        "skipped_steps": 256,
+        "null_max_deviation": 0.009396523237228394,
+        "exceeds_threshold": true,
+        "gate_fires": false
+      }
+    ]
+  },
+  "excluded_cells": [],
+  "excluded_cells_are": "cells whose CORRECT sync leg exceeded the threshold. The null result beside such a cell is not attributable to the missed update, so it is reported and left out of the resolution rather than averaged in.",
+  "cells": [
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 6.206333637237549e-06,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 1,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 6.273388862609863e-06,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 8.672475814819336e-06,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 2,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 8.463859558105469e-06,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.1563301086425781e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 3,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 1.1324882507324219e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.4007091522216797e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 4,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 1.3768672943115234e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.4960765838623047e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 5,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 1.4722347259521484e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.7374753952026367e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 6,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 1.7255544662475586e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.7210841178894043e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 7,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 1.710653305053711e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.767277717590332e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 8,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 1.7568469047546387e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 6.175041198730469e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 1,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 6.157159805297852e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 8.600950241088867e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 2,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 8.606910705566406e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00010813400149345398,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 3,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.00010788068175315857,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00013780593872070312,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 4,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.00013756752014160156,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00014418363571166992,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 5,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.00014418363571166992,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00017192959785461426,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 6,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.0001716911792755127,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00016900897026062012,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 7,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.00016890466213226318,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.000174790620803833,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 8,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.00017468631267547607,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0006155967712402344,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 1,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.0006154179573059082,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0008611381053924561,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 2,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.0008611977100372314,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0010810941457748413,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 3,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.001080840826034546,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.001371145248413086,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 4,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.0013709068298339844,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0014328360557556152,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 5,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 0.0014328360557556152,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0017145872116088867,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 6,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.0017143487930297852,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.001688152551651001,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 7,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.001688048243522644,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0017431676387786865,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 8,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.0017430633306503296,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.006147265434265137,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 1,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.0061470866203308105,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.008607089519500732,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 2,
+      "correct_max_deviation": 7.450580596923828e-07,
+      "null_max_deviation": 0.008607149124145508,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.010823365300893784,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 3,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.010823111981153488,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.013785123825073242,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 4,
+      "correct_max_deviation": 8.642673492431641e-07,
+      "null_max_deviation": 0.01378488540649414,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.01434856653213501,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 5,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 0.01434856653213501,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.017177671194076538,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 6,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.017177432775497437,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.016910433769226074,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 7,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.016910329461097717,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.017433181405067444,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 8,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.017433077096939087,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.060742974281311035,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 1,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.06074279546737671,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.08496809005737305,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 2,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 0.08496814966201782,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.11255419254302979,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 3,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.11255395412445068,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.1458004117012024,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 4,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.1458001732826233,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.14755883812904358,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 5,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.14755859971046448,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.1744210124015808,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 6,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.1744207739830017,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.1708560436964035,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 7,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.17085593938827515,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.17377133667469025,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 8,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.1737712323665619,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.5942844748497009,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 1,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.5942845344543457,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.8951196074485779,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 2,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.8951196670532227,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.2602193355560303,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 3,
+      "correct_max_deviation": 8.791685104370117e-07,
+      "null_max_deviation": 1.2602190971374512,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.6864567995071411,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 4,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 1.686456561088562,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.7974135875701904,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 5,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 1.7974133491516113,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.5795353651046753,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 6,
+      "correct_max_deviation": 9.238719940185547e-07,
+      "null_max_deviation": 1.5795351266860962,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.4721068143844604,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 7,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 1.472106695175171,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.4018723964691162,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv2",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 8,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 1.4018720388412476,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 6.9141387939453125e-06,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 1,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 7.092952728271484e-06,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-06,
+      "skipped_steps": 1,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 7.152557373046875e-06,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 8.732080459594727e-06,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 2,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 8.702278137207031e-06,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-06,
+      "skipped_steps": 2,
+      "correct_max_deviation": 8.642673492431641e-07,
+      "null_max_deviation": 8.58306884765625e-06,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.1086463928222656e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 3,
+      "correct_max_deviation": 7.301568984985352e-07,
+      "null_max_deviation": 1.099705696105957e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-06,
+      "skipped_steps": 3,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 1.1205673217773438e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.3083219528198242e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 4,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 1.3083219528198242e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-06,
+      "skipped_steps": 4,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 1.309812068939209e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.54152512550354e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 5,
+      "correct_max_deviation": 7.450580596923828e-07,
+      "null_max_deviation": 1.55717134475708e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-06,
+      "skipped_steps": 5,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 1.5459954738616943e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.671910285949707e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 6,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 1.687556505203247e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-06,
+      "skipped_steps": 6,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 1.6763806343078613e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.7076730728149414e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 7,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 1.7017126083374023e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-06,
+      "skipped_steps": 7,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 1.6957521438598633e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-06,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.7628073692321777e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-06,
+      "skipped_steps": 8,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 1.7762184143066406e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-06,
+      "skipped_steps": 8,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 1.7434358596801758e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 6.842613220214844e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 1,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 6.860494613647461e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-05,
+      "skipped_steps": 1,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 6.866455078125e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 8.565187454223633e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 2,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 8.556246757507324e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-05,
+      "skipped_steps": 2,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 8.550286293029785e-05,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00011052191257476807,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 3,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.00011052191257476807,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-05,
+      "skipped_steps": 3,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 0.00011053681373596191,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00013265013694763184,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 4,
+      "correct_max_deviation": 8.046627044677734e-07,
+      "null_max_deviation": 0.00013265013694763184,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-05,
+      "skipped_steps": 4,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 0.00013266503810882568,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00015213340520858765,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 5,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.00015228986740112305,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-05,
+      "skipped_steps": 5,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.0001521781086921692,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00016570091247558594,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 6,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.00016585737466812134,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-05,
+      "skipped_steps": 6,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 0.00016574561595916748,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00017276406288146973,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 7,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 0.00017264485359191895,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-05,
+      "skipped_steps": 7,
+      "correct_max_deviation": 9.238719940185547e-07,
+      "null_max_deviation": 0.00017264485359191895,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 1e-05,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0001771003007888794,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 1e-05,
+      "skipped_steps": 8,
+      "correct_max_deviation": 7.450580596923828e-07,
+      "null_max_deviation": 0.00017720460891723633,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 1e-05,
+      "skipped_steps": 8,
+      "correct_max_deviation": 1.0132789611816406e-06,
+      "null_max_deviation": 0.00017711520195007324,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0006853938102722168,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 1,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.000685572624206543,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.0001,
+      "skipped_steps": 1,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 0.0006856322288513184,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0008573234081268311,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 2,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.000857234001159668,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.0001,
+      "skipped_steps": 2,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 0.0008571743965148926,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0011046677827835083,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 3,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.0011046677827835083,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.0001,
+      "skipped_steps": 3,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.0011046826839447021,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0013252794742584229,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 4,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.0013252794742584229,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.0001,
+      "skipped_steps": 4,
+      "correct_max_deviation": 1.0132789611816406e-06,
+      "null_max_deviation": 0.0013252943754196167,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0015237629413604736,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 5,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.001523919403553009,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.0001,
+      "skipped_steps": 5,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 0.0015238076448440552,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00165596604347229,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 6,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.0016561225056648254,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.0001,
+      "skipped_steps": 6,
+      "correct_max_deviation": 9.834766387939453e-07,
+      "null_max_deviation": 0.0016560107469558716,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.001729339361190796,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 7,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.0017292201519012451,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.0001,
+      "skipped_steps": 7,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.0017292201519012451,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.0001,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.0017711371183395386,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.0001,
+      "skipped_steps": 8,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.0017712414264678955,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.0001,
+      "skipped_steps": 8,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.0017711520195007324,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.006852865219116211,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 1,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.006853044033050537,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.001,
+      "skipped_steps": 1,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 0.0068531036376953125,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.00858372449874878,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 2,
+      "correct_max_deviation": 8.642673492431641e-07,
+      "null_max_deviation": 0.008583635091781616,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.001,
+      "skipped_steps": 2,
+      "correct_max_deviation": 1.0132789611816406e-06,
+      "null_max_deviation": 0.00858357548713684,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.011057853698730469,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 3,
+      "correct_max_deviation": 8.642673492431641e-07,
+      "null_max_deviation": 0.011057853698730469,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.001,
+      "skipped_steps": 3,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.011057868599891663,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.013255119323730469,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 4,
+      "correct_max_deviation": 8.046627044677734e-07,
+      "null_max_deviation": 0.013255119323730469,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.001,
+      "skipped_steps": 4,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.013255134224891663,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.015234492719173431,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 5,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.015234649181365967,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.001,
+      "skipped_steps": 5,
+      "correct_max_deviation": 1.0132789611816406e-06,
+      "null_max_deviation": 0.015234537422657013,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.016553185880184174,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 6,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.01655334234237671,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.001,
+      "skipped_steps": 6,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.016553230583667755,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.01727825403213501,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 7,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.01727813482284546,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.001,
+      "skipped_steps": 7,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 0.01727813482284546,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.001,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.01771676540374756,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.001,
+      "skipped_steps": 8,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.017716869711875916,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.001,
+      "skipped_steps": 8,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 0.017716780304908752,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.06823664903640747,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 1,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.0682368278503418,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.01,
+      "skipped_steps": 1,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.06823688745498657,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.08674940466880798,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 2,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 0.08674931526184082,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.01,
+      "skipped_steps": 2,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 0.08674925565719604,
+      "correct_sync_passes": true,
+      "gate_fires": false
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.1112121045589447,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 3,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.1112121045589447,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.01,
+      "skipped_steps": 3,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.1112121194601059,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.13193917274475098,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 4,
+      "correct_max_deviation": 7.748603820800781e-07,
+      "null_max_deviation": 0.13193917274475098,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.01,
+      "skipped_steps": 4,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 0.13193918764591217,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.1512552797794342,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 5,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.15125542879104614,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.01,
+      "skipped_steps": 5,
+      "correct_max_deviation": 1.0132789611816406e-06,
+      "null_max_deviation": 0.15125532448291779,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.16437426209449768,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 6,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.16437441110610962,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.01,
+      "skipped_steps": 6,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.16437430679798126,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.17006710171699524,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 7,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.1700669825077057,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.01,
+      "skipped_steps": 7,
+      "correct_max_deviation": 8.642673492431641e-07,
+      "null_max_deviation": 0.1700669825077057,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.01,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.17614862322807312,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.01,
+      "skipped_steps": 8,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.17614872753620148,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.01,
+      "skipped_steps": 8,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 0.17614863812923431,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 1,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.6612789630889893,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 1,
+      "correct_max_deviation": 7.152557373046875e-07,
+      "null_max_deviation": 0.6612788438796997,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.1,
+      "skipped_steps": 1,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 0.6612788438796997,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 2,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 0.8704301118850708,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 2,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 0.8704302310943604,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.1,
+      "skipped_steps": 2,
+      "correct_max_deviation": 9.98377799987793e-07,
+      "null_max_deviation": 0.8704304695129395,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 3,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.1030519008636475,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 3,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 1.1030519008636475,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.1,
+      "skipped_steps": 3,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 1.1030516624450684,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 4,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.1903351545333862,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 4,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 1.1903352737426758,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.1,
+      "skipped_steps": 4,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 1.1903350353240967,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 5,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.3592767715454102,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 5,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 1.3592771291732788,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.1,
+      "skipped_steps": 5,
+      "correct_max_deviation": 1.043081283569336e-06,
+      "null_max_deviation": 1.3592771291732788,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 6,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.2780818939208984,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 6,
+      "correct_max_deviation": 8.940696716308594e-07,
+      "null_max_deviation": 1.2780817747116089,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.1,
+      "skipped_steps": 6,
+      "correct_max_deviation": 9.08970832824707e-07,
+      "null_max_deviation": 1.2780818939208984,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 7,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.4736175537109375,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 7,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 1.473617434501648,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.1,
+      "skipped_steps": 7,
+      "correct_max_deviation": 9.5367431640625e-07,
+      "null_max_deviation": 1.4736175537109375,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 1,
+      "magnitude": 0.1,
+      "skipped_steps": 8,
+      "correct_max_deviation": 0.0,
+      "null_max_deviation": 1.512279987335205,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 2,
+      "magnitude": 0.1,
+      "skipped_steps": 8,
+      "correct_max_deviation": 8.344650268554688e-07,
+      "null_max_deviation": 1.512279748916626,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    },
+    {
+      "config": "kv4",
+      "source_layout": "storage@t4",
+      "dst_degree": 4,
+      "magnitude": 0.1,
+      "skipped_steps": 8,
+      "correct_max_deviation": 9.834766387939453e-07,
+      "null_max_deviation": 1.5122802257537842,
+      "correct_sync_passes": true,
+      "gate_fires": true
+    }
+  ],
+  "environment": {
+    "torch": "2.14.0+cu130",
+    "numpy": "2.4.6",
+    "python": "3.12.3",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39",
+    "machine": "x86_64",
+    "dtype": "torch.float32",
+    "device": "cpu",
+    "git_commit": "9bcecdc9e9b0d8ee3f13e0966e3f452295814c7b"
+  },
+  "generated_at": "2026-09-05T23:20:58+00:00"
+}

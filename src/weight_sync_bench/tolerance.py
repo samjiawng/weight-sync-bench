@@ -109,6 +109,18 @@ RULE = (
 # Floor for the degenerate all-zeros case, which would make log10 undefined.
 MIN_THRESHOLD = 1e-9
 
+# How far a deviation must clear the threshold before it counts as a detected
+# layout error rather than a tolerance set slightly too tight. The threshold is
+# already SAFETY_FACTOR x the measured floor, so this puts a real bug at >= 1e4 x
+# the floor -- the "three to six orders of magnitude" separation the spec expects.
+#
+# It lives here, beside the threshold it multiplies, because two consumers need
+# the same number: the break cases assert their injected layout errors clear it,
+# and the gate-resolution sweep asks how many optimizer steps a missed sync must
+# skip before it clears the same bar. `src` importing from `tests` is not an
+# option, and a second copy of a required separation is a second thing to drift.
+MIN_SEPARATION = 100.0
+
 
 class EnvironmentMismatch(UserWarning):
     """The artifact was measured under a different environment than the one running.

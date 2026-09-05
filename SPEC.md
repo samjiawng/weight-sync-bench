@@ -938,6 +938,33 @@ as warmup and say so.
 The invariant runs at every configuration, using the 2a threshold. A timing measurement of a sync
 that delivered wrong weights is worthless, so correctness gates every recorded number.
 
+**MEASURED LIMITATION: the invariant does not catch a transport that delivered nothing.** The gate
+compares logits, and a sampler holding the previous step's weights produces logits that differ
+from the intended ones by far less than the floor admits. Swept on the toy model at the phase 1a
+threshold, a single missed sync at a per-step update magnitude of 1e-4 relative to the weight scale
+deviates by about 7e-4, which does not clear even the bare threshold, let alone the hundredfold
+separation a break case is required to clear. The null deviation grows as the square root of the
+number of missed steps, since skipped updates accumulate as a random walk while the gate is a
+fixed absolute bar, so the crossing sits near thirty thousand consecutive missed syncs. The
+smallest detectable magnitude in the sweep is 1e-2, two orders above where a real optimizer step is
+expected to sit.
+
+The consequence is a scope statement and not a threshold to retune. The invariant catches gross
+corruption, which is what the break cases inject and what a wrong layout table produces. It does
+not catch a silent no-op, and no choice of threshold would: tightening it far enough to see one
+missed step would put it below the reduction-order floor the threshold exists to admit. A transport
+that delivers nothing therefore has to be caught by comparing the delivered parameters against the
+state the sync intended to deliver, directly rather than through the logits. That check belongs
+with the transports, and every recorded timing needs it alongside the invariant rather than
+instead of it.
+
+**The reference is the state the sync intended to deliver, never the source's current state.**
+Deliberately stale weights and a broken transport are the same bytes, so this choice is what lets
+phase 3 vary staleness without the gate firing on it while a dead transport still fails. Measured
+on the same fixture: a sync that correctly delivered step k-1, with the source since advanced to
+k, reads 8.3e-7 against the intended state and 6.8e-2 against the source's current state. One
+passes and one fails, and only the first is a statement about the transport.
+
 ---
 
 ## Artifacts

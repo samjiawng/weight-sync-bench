@@ -46,16 +46,14 @@ from weight_sync_bench.shardspec import (
     build_layout_table,
     unrepresentable_roles,
 )
-from weight_sync_bench.tolerance import ARTIFACT, load, load_threshold
+from weight_sync_bench.tolerance import (
+    ARTIFACT,
+    MIN_SEPARATION,
+    load,
+    load_threshold,
+)
 
 THRESHOLD = load_threshold()
-
-# A break must clear the threshold by this factor, not merely exceed it. The
-# threshold is already 100x the measured floor, so this puts a real layout bug at
-# >= 1e4 x the floor -- the "three to six orders of magnitude" separation the spec
-# expects. A break that only just exceeds the threshold would be indistinguishable
-# from a tolerance that was set slightly too tight.
-MIN_SEPARATION = 100.0
 
 # Degrees at which a break is meaningful. t=1 is excluded: see the module docstring.
 BREAK_DEGREES = [
