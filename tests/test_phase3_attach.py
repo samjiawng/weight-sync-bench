@@ -153,14 +153,18 @@ def test_no_module_level_gpu_imports_in_attach():
 # --- the composed class -----------------------------------------------------
 
 
-def test_composed_qualname_is_what_the_launcher_binds():
+def test_launcher_binds_a_qualname_string_from_this_module():
     """The launcher binds a qualname string, not a class: vLLM resolves this
     field by qualname inside each worker, and spawn-based workers never see this
-    process's dict mutation."""
-    assert attach.COMPOSED_WORKER_QUALNAME == engine_probe.COMPOSED_WORKER_QUALNAME
-    module, _, name = attach.COMPOSED_WORKER_QUALNAME.rpartition(".")
-    assert module == engine_probe.__name__
-    assert name == engine_probe.COMPOSED_WORKER_NAME
+    process's dict mutation.
+
+    Which string it binds is asserted in test_phase3_composition.py, where both
+    transports are checked; here only the shape is."""
+    for transport in engine_probe.PRIME_RL_WORKER_EXTENSIONS:
+        qualname = engine_probe.composed_worker_qualname(transport)
+        module, _, name = qualname.rpartition(".")
+        assert module == engine_probe.__name__
+        assert name.startswith(engine_probe.COMPOSED_WORKER_NAME)
 
 
 def test_bind_rejects_an_unknown_transport():

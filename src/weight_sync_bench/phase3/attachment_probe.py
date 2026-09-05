@@ -56,6 +56,7 @@ from .engine_probe import (
     COMPOSED_WORKER_QUALNAME,
     MULTI_CAPTURE_MARKER,
     DEFAULT_BROADCAST_TYPE,
+    composed_worker_qualname,
     probe_environment,
 )
 from .pin import provenance
@@ -132,6 +133,14 @@ def check_composition(broadcast_type: str = DEFAULT_BROADCAST_TYPE) -> dict[str,
     that `type()` composes what it is given, which was never in doubt; what is
     in doubt is whether prime-rl's actual worker composes with the hook without
     either shadowing the other.
+
+    EVERY FIELD HERE IS PER TRANSPORT. There is one composed class per weight-
+    broadcast transport, and recording the bare name beside a transport-specific
+    MRO makes an artifact that cannot be read: the name says one thing and the
+    class it resolved says another. Resolving the bare name here would also
+    compare two different classes at any transport but the default and report
+    `resolved_by_qualname` false for a naming reason while reading as a
+    composition failure.
     """
     from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -139,6 +148,7 @@ def check_composition(broadcast_type: str = DEFAULT_BROADCAST_TYPE) -> dict[str,
     from .engine_probe import PRIME_RL_WORKER_EXTENSIONS, compose_worker_extension
 
     composed = compose_worker_extension(broadcast_type)
+    qualname = composed_worker_qualname(broadcast_type)
     base = resolve_obj_by_qualname(PRIME_RL_WORKER_EXTENSIONS[broadcast_type])
 
     def public(cls: type) -> list[str]:
@@ -148,9 +158,12 @@ def check_composition(broadcast_type: str = DEFAULT_BROADCAST_TYPE) -> dict[str,
     hook_methods = public(LogitsHookWorkerExtension)
     missing = [m for m in prime_rl_methods + hook_methods if not hasattr(composed, m)]
 
+    resolved_by_qualname = resolve_obj_by_qualname(qualname) is composed
+
     return {
-        "resolved_by_qualname": resolve_obj_by_qualname(COMPOSED_WORKER_QUALNAME) is composed,
-        "qualname": COMPOSED_WORKER_QUALNAME,
+        "broadcast_type": broadcast_type,
+        "resolved_by_qualname": resolved_by_qualname,
+        "qualname": qualname,
         "mro": [f"{k.__module__}.{k.__qualname__}" for k in composed.__mro__],
         "prime_rl_base": f"{base.__module__}.{base.__qualname__}",
         "prime_rl_base_in_mro": base in composed.__mro__,
@@ -158,7 +171,12 @@ def check_composition(broadcast_type: str = DEFAULT_BROADCAST_TYPE) -> dict[str,
         "prime_rl_methods": prime_rl_methods,
         "logits_hook_methods": hook_methods,
         "missing_methods": missing,
+        # `resolved_by_qualname` is part of the verdict, not decoration: the
+        # qualname is the only thing that travels to a spawned worker, so a
+        # composition that is correct in this process and unreachable by name
+        # is not a working attachment.
         "passed": not missing
+        and resolved_by_qualname
         and base in composed.__mro__
         and LogitsHookWorkerExtension in composed.__mro__,
     }
@@ -207,6 +225,11 @@ def _direct_engine_worker(
 
     llm = LLM(
         model=model_dir,
+        # The BARE name, deliberately, and it is the one place that is still
+        # right: this engine is standalone, with no prime-rl weight broadcast
+        # in play, and the bare name is documented to mean the filesystem
+        # composition. It resolves to the same class as
+        # `composed_worker_qualname("filesystem")`.
         worker_extension_cls=COMPOSED_WORKER_QUALNAME,
         **MATCHED_ENGINE_FLAGS,
     )
@@ -231,10 +254,20 @@ def check_attachment(
 ) -> dict[str, Any]:
     """Extract through the route, extract directly, compare with `torch.equal`.
 
-    Bit-identity is the right acceptance here, unlike in the flag differential,
-    precisely BECAUSE the flags match: this compares two paths to the same
-    computation rather than two computations. That is what phase 2b's extraction
-    check compared when it earned `torch.equal`.
+    Bit-identity was expected here on the reasoning that the flags match, so
+    this compares two paths to the same computation rather than two
+    computations. THE MEASUREMENT REFUTED THAT. Two deterministic engines whose
+    resolved configs agree field for field still differ across the serving
+    boundary -- 2.3e-3 mean, 6.2e-2 worst element -- while the same prompt twice
+    off one server is bit-identical. That is reduction order across the
+    boundary, not divergence.
+
+    So `bit_identical` is recorded and is not the acceptance. It is also NOT
+    replaced by phase 2a's floor mean, which measures TP1 against TP2 inside one
+    process: dividing this deviation by that number is the error the flag
+    profile rule exists to prevent. The acceptance is a floor measured for THIS
+    comparison, in `serving_floor.py`; this check reports the deviation that
+    floor is built from.
     """
     import os
     import tempfile
@@ -413,8 +446,14 @@ def run_probe(
     seed: int = DEFAULT_SEED,
     step_runner_result: dict[str, Any] | None = None,
     direct_engine_env: dict[str, str] | None = None,
+    broadcast_type: str = DEFAULT_BROADCAST_TYPE,
 ) -> dict[str, Any]:
-    """Run check 0, and the rest only if check 0 permits it."""
+    """Run check 0, and the rest only if check 0 permits it.
+
+    `broadcast_type` is the transport the RUNNING server was started under. It
+    selects which composed class check 4 asserts, so passing the wrong one
+    checks a class the server is not using.
+    """
     if model_dir is None:
         from huggingface_hub import snapshot_download
 
@@ -428,6 +467,7 @@ def run_probe(
         ),
         "base_url": base_url,
         "model_dir": model_dir,
+        "broadcast_type": broadcast_type,
         "patches": {
             "names": list(attach.PATCHES),
             "sha256": attach.patch_digests(),
@@ -467,7 +507,7 @@ def run_probe(
         base_url, model_dir, python, prompts, seq_len, seed, direct_engine_env
     )
     check_3 = check_prime_rl_rpcs(base_url, model_dir)
-    check_4 = check_composition()
+    check_4 = check_composition(broadcast_type)
 
     checks = {
         "check_0_chunked_prefill_off": check_0,
@@ -504,6 +544,17 @@ def main() -> None:
     parser.add_argument("--seq-len", type=int, default=DEFAULT_SEQ_LEN)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument(
+        "--broadcast-type",
+        type=str,
+        default=DEFAULT_BROADCAST_TYPE,
+        help="weight-broadcast transport the running server was started under",
+    )
+    parser.add_argument(
+        "--composition-only",
+        action="store_true",
+        help="run check 4 alone, at --broadcast-type; needs no server and no GPU",
+    )
+    parser.add_argument(
         "--step-runner-artifact",
         type=Path,
         default=None,
@@ -514,6 +565,13 @@ def main() -> None:
     if args.worker:
         assert args.model_dir and args.tokens and args.out
         _direct_engine_worker(args.model_dir, json.loads(args.tokens), args.out)
+        return
+
+    if args.composition_only:
+        # Check 4 is imports and MRO only, so it is the one check that can be
+        # run at a transport without paying for a server on that transport.
+        result = check_composition(args.broadcast_type)
+        print(json.dumps(result, indent=2))
         return
 
     step_runner_result = None
@@ -538,6 +596,7 @@ def main() -> None:
         seq_len=args.seq_len,
         seed=args.seed,
         step_runner_result=step_runner_result,
+        broadcast_type=args.broadcast_type,
     )
     path = write(report, args.out or ARTIFACT)
     if report["outcome"] == OUTCOME_STOPPED:

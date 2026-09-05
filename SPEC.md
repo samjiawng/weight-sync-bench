@@ -864,6 +864,11 @@ Three, in increasing implementation cost. Build in this order.
 
 Each implements the phase 1 `Transport` protocol and returns a populated `SyncRecord`.
 
+The serving-boundary floor is measured under one transport, so transport independence of the
+served numerics is checked here rather than assumed. At the second transport, one repetition of
+the same served-against-direct comparison runs against the recorded floor. A deviation that does
+not sit at the floor is a finding about the transport, not a number to average into it.
+
 ---
 
 ## 2e. Measurement
@@ -1080,7 +1085,14 @@ floor is not that measurement. It is TP1 against TP2 inside one process, a diffe
 and dividing this deviation by it would repeat exactly the error the flag-profile rule was built
 to avoid. What phase 3 needs before it gates anything is a serving-boundary floor measured the
 way every other floor here was measured, with the break-case injections run through the served
-path to show the separation still holds.
+path to show the separation still holds. Two conditions on that measurement follow from what is
+already recorded here. The injections do not run at layer 0 alone: the phase 2a gate is calibrated
+at the one position in the model where an injected layout error is most visible, and a served
+floor that inherits that calibration inherits the limitation with it, so the separation is
+reported at layer 0 and at a layer in the 7 to 27 band, and the served gate states which of the
+two it holds at. And the floor artifact records the weight-broadcast transport the server ran
+under, because the transport selects the worker class each engine is built from, and a floor
+whose transport is unrecorded cannot be compared against a run on a different one.
 
 The attachment question is resolved, so 2c through 2e are unblocked on design. The serving-boundary
 floor is what stands between them and a gate, and it is a measurement rather than a decision.

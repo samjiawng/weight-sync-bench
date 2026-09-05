@@ -12,8 +12,9 @@ independent:
 1. **The hook has to be inside the workers.** `worker_extension_cls` names
    exactly one class, so the logits hook cannot be supplied alongside prime-rl's
    weight-update worker -- it has to be mixed into it. That composed class is
-   `engine_probe.PrimeRlLogitsHookWorker`. Getting prime-rl to use it has two
-   routes, and which one applies depends on who starts the server:
+   built per transport by `engine_probe.compose_worker_extension` and named
+   by `engine_probe.composed_worker_qualname`. Getting prime-rl to use it
+   has two routes, and which one applies depends on who starts the server:
 
    - `serve()` below rebinds `WORKER_EXTENSION_CLS` in-process before calling
      prime-rl's `server()`, which reads the dict at call time. This needs NO
@@ -49,9 +50,9 @@ from pathlib import Path
 from typing import Any
 
 from .engine_probe import (
-    COMPOSED_WORKER_QUALNAME,
     DEFAULT_BROADCAST_TYPE,
     PRIME_RL_WORKER_EXTENSIONS,
+    composed_worker_qualname,
 )
 
 PATCH_DIR = Path(__file__).resolve().parent / "patches"
@@ -114,6 +115,16 @@ def bind_worker_extension(broadcast_type: str = DEFAULT_BROADCAST_TYPE) -> str:
     A qualname STRING is bound, not a class object: vLLM resolves this field by
     qualname inside each worker process, and with spawn-based workers the child
     never sees this process's dict mutation. The string is what travels.
+
+    The name bound is the TRANSPORT'S name, not the bare one. Binding the bare
+    name here would install the filesystem composition under every key,
+    including NCCL -- which `rl` auto-selects for any run with an inference
+    server and no LoRA -- and that mismatch does not fail at bind time. It fails
+    later inside prime-rl's weight-update path with
+    "init_broadcaster() takes 1 positional argument but 8 were given", an error
+    that names the method rather than the transport it was built for. The key
+    and the value have to agree about the transport, and only
+    `composed_worker_qualname` makes them.
     """
     if broadcast_type not in PRIME_RL_WORKER_EXTENSIONS:
         raise ValueError(
@@ -122,8 +133,9 @@ def bind_worker_extension(broadcast_type: str = DEFAULT_BROADCAST_TYPE) -> str:
         )
     from prime_rl.inference.vllm import server as prime_rl_server
 
-    prime_rl_server.WORKER_EXTENSION_CLS[broadcast_type] = COMPOSED_WORKER_QUALNAME
-    return COMPOSED_WORKER_QUALNAME
+    qualname = composed_worker_qualname(broadcast_type)
+    prime_rl_server.WORKER_EXTENSION_CLS[broadcast_type] = qualname
+    return qualname
 
 
 def serve(config: Any, broadcast_type: str | None = None) -> None:
