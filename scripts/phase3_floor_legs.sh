@@ -5,7 +5,11 @@
 # --model, so a difference between legs cannot be a difference in how the server
 # was brought up. The launch argv is recorded into each leg and the assembly
 # step refuses to combine legs whose commands differ anywhere else.
-set -euo pipefail
+set -Eeuo pipefail
+# Say so when the sweep ends early. Two runs of this sweep died at a teardown
+# with the last leg written and no line after it, which reads as a finished leg
+# rather than as an aborted sweep; `-E` carries the trap into `run_leg`.
+trap 'status=$?; echo "!!! sweep aborted: line $LINENO exited $status" >&2' ERR
 
 REPO=/workspace/weight-sync-bench
 PY=$REPO/.venv-phase3/bin/python
@@ -20,7 +24,12 @@ LOGDIR=${LOGDIR:-/opt/wsb/serverlogs}
 # FileNotFoundError: 'ninja' unless it is on PATH explicitly. Measured, not
 # precautionary: this is what the first engine start failed on.
 export PATH=/opt/wsb/venv-phase3/bin:$PATH
-export HF_HOME=/workspace/hf VLLM_LOGGING_LEVEL=WARNING
+# INFO rather than WARNING: vLLM names the attention backend it resolved in its
+# startup log and nowhere else reachable from here, and that string is the
+# evidence behind the floor's scope condition -- the backend is the one thing
+# MATCHED_ENGINE_FLAGS does not pin, and vLLM picks it by compute capability.
+# The level is inert numerically; it changes what is written down, not what runs.
+export HF_HOME=/workspace/hf VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
 mkdir -p "$LEGS" "$LOGDIR"
 
 run_leg() {
@@ -69,9 +78,25 @@ run_leg() {
   # this sweep died.
   kill $pid 2>/dev/null || true
   wait $pid 2>/dev/null || true
-  local orphans
+  # Kill only a process this sweep actually started. Inside a container
+  # `nvidia-smi` reports HOST pids, which collide with unrelated pids in this
+  # namespace, so killing the list blind kills whatever happens to hold that
+  # number here -- including this script. Measured: an unguarded `kill -9` on
+  # this list ended the sweep after the clean leg, silently, with the server
+  # already shut down cleanly and no line written after it. Matching on the
+  # command line makes the kill specific to the engine that outlived its
+  # launcher, which is the case this block exists for.
+  # One `if`, and no `[ ... ] && ...` short-circuit: under `set -e` a false
+  # test as the last command of a loop body ends the whole sweep, silently,
+  # exactly where a leg has just been written and nothing looks wrong. Measured
+  # twice here. An `if` whose condition is false leaves status 0.
+  local orphans opid
   orphans=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader || true)
-  [ -n "$orphans" ] && kill -9 $orphans 2>/dev/null || true
+  for opid in $orphans; do
+    if [ "$opid" != "$$" ] && ps -p "$opid" -o args= 2>/dev/null | grep -qE "phase3_serve|vllm|EngineCore"; then
+      kill -9 "$opid" 2>/dev/null || true
+    fi
+  done
   # `if`, not `[ ... ] && break`: under `set -e` that list returns non-zero on
   # the iterations where the GPU is NOT yet free, which exits the whole sweep
   # silently. Measured -- it ended this sweep after one break leg.

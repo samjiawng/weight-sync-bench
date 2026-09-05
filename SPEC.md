@@ -1127,6 +1127,24 @@ parallel degree, and it is 17x tighter than the floor phase 2a measured, which i
 the depth verdict recorded in 2a's limitation above. The pass at layer 13 has roughly an eighth
 of layer 0's headroom, so a floor regression would flip it and leave layer 0 untouched.
 
+The floor is scoped to the GPU it was measured on, and that is a condition on the number rather
+than provenance about it. The matched flag set pins every engine flag this comparison depends on
+except the attention backend, which neither this harness nor the serving stack sets and which vLLM
+selects by compute capability. The device name therefore stands proxy for the attention kernel,
+and the kernel sets the reduction order the floor measures. Capacity has nothing to do with it: a
+0.6B model fits anywhere. So every leg records the device it ran on, assembly refuses to combine
+legs that disagree or that record no device at all, and the loader every later consumer reads this
+floor through raises when the running device is not the recorded one. Fail rather than warn,
+because the hardware is chosen deliberately and a floor read on another architecture is wrong
+rather than stale.
+
+Re-measuring the whole sweep on a second box reproduced every cell byte for byte: the floor mean,
+all six break means, every per-cell deviation and the corruption verification, across a rebuilt
+environment on a different kernel and a different driver. Given the device, the engine version,
+the matched flags and the seeds, this comparison is deterministic, so the repetitions measure
+variation across prompts and not across runs. That is also what leaves the device as the only free
+variable, which is the argument the scope condition rests on.
+
 ### 3b. 2c through 2e, against the engine the probe validated
 
 Phase 2's remaining deliverables, built once and against a settled engine construction rather

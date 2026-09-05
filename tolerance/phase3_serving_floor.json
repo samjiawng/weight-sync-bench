@@ -1022,7 +1022,86 @@
   "gate_carried_forward": {
     "layer": 0,
     "verdict": "pass",
-    "note": "This is the gate at one layer, not a general one. Phase 2a's depth sweep found the gate passes at layer 0 and fails at 7, 13, 20 and 27 as a step rather than a gradient; the layer 13 legs here reproduce that across the serving boundary. A failing verdict at layer 13 is a recorded result, not an unresolved defect."
+    "verdicts": {
+      "layer_0": "pass",
+      "layer_13": "pass"
+    },
+    "weakest_case_ratio_to_gate": {
+      "layer_0": 31.124467064141236,
+      "layer_13": 3.791338679968278
+    },
+    "break_magnitude_depth_ratios": {
+      "layer_0_over_layer_13": {
+        "case1_qkv_head_permute": 10.313830587741629,
+        "case2_oproj_col_permute": 7.841416877351279,
+        "case3_norm_permute": 5.79986359345052
+      }
+    },
+    "phase2a_reference": {
+      "artifact": "phase2a_layer_depth_finding.json",
+      "layer0_over_deep_ratios": {
+        "case1_qkv_head_permute": 7.81,
+        "case2_oproj_col_permute": 9.71,
+        "case3_norm_permute": 5.97
+      },
+      "verdicts": {
+        "layer_0": "pass",
+        "layer_13": "fail"
+      },
+      "floor_mean_deviation": 0.03898,
+      "weakest_over_floor_at_deep_layer": 4.148281169830683
+    },
+    "required_separation_over_floor": 30,
+    "note": "All measured layers (layer_0, layer_13) pass: layer_0 pass, layer_13 pass. The gate the served path carries forward is layer 0's, which is the position phase 2a calibrated at; it is not a general gate. The depth step in break MAGNITUDE is reproduced: layer 0 over layer 13 is 10.3x / 7.8x / 5.8x by case here, against phase 2a's 7.8x / 9.7x / 6.0x at the same pair. The VERDICT is floor-relative and did NOT carry over from phase 2a, where layer 13 was fail. Against its own floor the weakest case at layer 13 separates by 114x here and by 4.1x in 2a, against the same required 30x. The break magnitudes are the smaller part of that difference; the served floor being tighter is the larger. The layers are not interchangeable: layer_13 clears the gate by 3.79x, layer_0 clears the gate by 31.12x. A floor regression flips layer_13 first and leaves layer_0 untouched, so the better number is not the general one.",
+    "note_is": "generated from this run's legs, not written from an expectation. An earlier hand-written version of this field stated a failing verdict at the deeper layer while the measurement beside it said pass."
+  },
+  "scope": {
+    "device_name": "NVIDIA A100-SXM4-80GB",
+    "condition": "This floor is valid only on the recorded device_name. MATCHED_ENGINE_FLAGS pins every engine flag this comparison depends on EXCEPT the attention backend, which neither this project nor prime-rl sets and which vLLM selects by compute capability. The device name therefore stands proxy for the attention kernel, and the kernel sets the reduction order this floor measures. Capacity is not involved: the model fits on any modern card.",
+    "why_not_provenance": "`environment.gpu_name` is provenance: it says where this ran. `scope.device_name` is a condition: it says where the number may be used. They carry the same string and answer different questions, and only the second one raises -- see `load_serving_floor`.",
+    "checked_by": "`load_serving_floor` raises when the recorded device name differs from the running one, and `assemble` refuses to combine legs that disagree. Fail, not warn: this follows the precedent phase 1 sets for a value under the repo's own control, where a mismatch makes the number wrong rather than merely stale, not the environment block's precedent of warning on a version bump.",
+    "per_leg": {
+      "direct_reference": "NVIDIA A100-SXM4-80GB",
+      "clean": "NVIDIA A100-SXM4-80GB",
+      "case1_qkv_head_permute@layer0": "NVIDIA A100-SXM4-80GB",
+      "case1_qkv_head_permute@layer13": "NVIDIA A100-SXM4-80GB",
+      "case2_oproj_col_permute@layer0": "NVIDIA A100-SXM4-80GB",
+      "case2_oproj_col_permute@layer13": "NVIDIA A100-SXM4-80GB",
+      "case3_norm_permute@layer0": "NVIDIA A100-SXM4-80GB",
+      "case3_norm_permute@layer13": "NVIDIA A100-SXM4-80GB"
+    },
+    "matches_across_legs": true,
+    "attention_backend": {
+      "backend": "FLASH_ATTN",
+      "per_leg": {
+        "case1_qkv_head_permute@layer0": "FLASH_ATTN",
+        "case1_qkv_head_permute@layer13": "FLASH_ATTN",
+        "case2_oproj_col_permute@layer0": "FLASH_ATTN",
+        "case2_oproj_col_permute@layer13": "FLASH_ATTN",
+        "case3_norm_permute@layer0": "FLASH_ATTN",
+        "case3_norm_permute@layer13": "FLASH_ATTN",
+        "clean": "FLASH_ATTN"
+      },
+      "same_across_legs": true,
+      "log_line": "Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].",
+      "source": "the startup log of each leg's server, at /opt/wsb/serverlogs/<leg>.log",
+      "how_read": "grepped from the server startup logs, not fetched from the running workers: adding a method to the patched route's allowlist to ask for it would widen the two-patch attachment for a provenance field."
+    },
+    "regenerate": "bash scripts/phase3_floor_legs.sh, then .venv-phase3/bin/python -m weight_sync_bench.phase3.serving_floor --assemble --leg-dir <leg dir>"
+  },
+  "flag_near_miss": {
+    "what": "A launcher that passed only part of MATCHED_ENGINE_FLAGS left the served side compiling and capturing CUDA graphs while the direct side ran under enforce_eager, so the clean leg measured a launcher difference rather than the serving boundary.",
+    "misread_clean_leg_mean": 0.0371,
+    "phase2a_floor_mean": 0.03725002110004425,
+    "phase2a_floor_artifact": "phase2a_bf16_floor_v2.json",
+    "phase2a_configuration": {
+      "repetitions": 20,
+      "batch": 4,
+      "seq_len": 32
+    },
+    "relative_difference": 0.00402740980042217,
+    "why_it_was_worth_catching": "The wrong answer agreed with a number already in the repo: the misread clean leg landed within half a percent of phase 2a's floor mean, a quantity measured across a DIFFERENT boundary. A broken measurement that lands on a familiar value is the one a reader checks least.",
+    "fix": "scripts/phase3_serve.py derives every argument from MATCHED_ENGINE_FLAGS rather than listing a subset, so the two sides read one definition of the matched set."
   },
   "offset_vs_corruption": "Break means contain the serving-boundary offset as well as the corruption. The offset is the floor mean above; the corruption is orders larger at both layers, so the offset rounds the break means rather than confounding them.",
   "patches": {
@@ -1031,7 +1110,7 @@
       "02-collective-rpc-route.patch"
     ],
     "sha256": {
-      "01-worker-extension-passthrough.patch": "4bff20d286835a41d11cbc99a7a29435b379d912fb866295fdf0d24755a217ee",
+      "01-worker-extension-passthrough.patch": "065be22124dac00212ec9e344cde8d281107bfddeaad4a3cfb90c7b16fd66000",
       "02-collective-rpc-route.patch": "e08a2a959fd37497c0e6d392fbb03081dc28a591d8774ecad7bed5061ecf8a15"
     },
     "count": 2
@@ -1045,7 +1124,7 @@
   },
   "environment": {
     "python": "3.12.3",
-    "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.39",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39",
     "machine": "x86_64",
     "model": "Qwen/Qwen3-0.6B",
     "pinned_vllm_version": "0.28.0",
@@ -1055,9 +1134,9 @@
     "gpu_count": 2,
     "gpu_name": "NVIDIA A100-SXM4-80GB",
     "cuda_version": "13.0",
-    "driver_version": "595.91.07",
+    "driver_version": "580.159.04",
     "vllm_installed_version": "0.28.0",
-    "git_commit": "b038269ca62d2bec102ee0c08e1afb81ed3673c0",
+    "git_commit": "6a18ca283cd57bd71578ce15fdc9160dab0d5ebd",
     "numpy": "2.3.5",
     "install": [
       "uv venv --python 3.12 .venv-phase3",
@@ -1065,14 +1144,15 @@
       "uv pip install --python .venv-phase3 -e . --no-deps"
     ]
   },
-  "environment_provenance": "Rebuilt from scratch after a pod restart wiped container disk: uv venv at /opt/wsb/venv-phase3, vLLM 0.28.0, the prime-rl pin installed EDITABLE (a non-editable install copies the source and the two patches never reach the imported module), five submodules fetched at their pinned SHAs, both patches applied, ninja on PATH for FlashInfer warm-up. Not the environment the earlier phase 3 artifacts were produced on.",
+  "environment_provenance": "Rebuilt from scratch on a new pod: the container disk was empty (no /opt/wsb, no .venv-phase3) and /workspace/hf held no checkpoint. uv venv at /opt/wsb/venv-phase3 with .venv-phase3 symlinked to it, vLLM 0.28.0, this package installed editable --no-deps, the prime-rl pin cloned at its recorded SHA with all five submodules checked out at their pinned SHAs and installed EDITABLE --no-deps (a non-editable install copies the source and the two patches never reach the imported module), prime-pydantic-config from the pin's own submodule, both patches applied to that clone, ninja on PATH for the FlashInfer warm-up, and Qwen3-0.6B re-downloaded. This is the third independent environment this floor has been measured on, and not the one any earlier phase 3 artifact was produced on.",
   "environment_snapshot": {
     "attempted": true,
-    "succeeded": false,
+    "succeeded": true,
     "command": "tar czf /workspace/venv-phase3.tar.gz -C /opt/wsb venv-phase3",
-    "failure": "gzip: stdout: Disk quota exceeded",
-    "bytes_written_before_failure": 3221225472,
-    "venv_size_uncompressed_bytes": 8268314624,
-    "note": "The network volume reports 161T free, so this is a per-account quota rather than volume exhaustion. The truncated 3.0 GiB partial was deleted: a file of that name would be taken for a restorable snapshot and is not one. Not worked around -- not split, not thinned, not moved off the volume."
+    "archive_bytes": 3908792090,
+    "venv_size_uncompressed_bytes": 8097143902,
+    "integrity_check": "gzip -t passed",
+    "restores_to": "/opt/wsb/venv-phase3, and only there: a venv carries absolute paths in pyvenv.cfg, in console-script shebangs and in its interpreter symlinks. Recreating the .venv-phase3 symlink is part of restoring.",
+    "note": "The same command on the previous network volume died with 'gzip: stdout: Disk quota exceeded' after writing exactly 3.0 GiB. Here it wrote past that point and completed. This volume is in a different datacenter and reports 203T free with about 25 GiB used by this account, so the earlier failure was a property of that volume rather than of the archive's size."
   }
 }

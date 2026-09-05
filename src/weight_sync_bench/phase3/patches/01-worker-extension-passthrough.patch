@@ -14,6 +14,17 @@ assignment conditional is what lets a class that SUBCLASSES the transport's own
 worker be substituted, which is how the weight-update RPCs the RL loop depends
 on stay intact while a logits hook is mixed in.
 
+WHAT THE GUARD COVERS, AND WHY IT IS NOT `is None`
+The guard tests FALSINESS, which reads as sloppy and is not. vLLM 0.28 defaults
+`worker_extension_cls` to the empty STRING, not to None, so the obvious spelling
+-- `getattr(args, "worker_extension_cls", None) is None` -- never fires on a
+server started without an explicit value. The fallback below would then never
+run and the server would bind NO worker extension at all: not the substituted
+one, and not prime-rl's own either, so `update_weights` and `liveness` answer
+`NotImplementedError` and the patch breaks the very thing it was written to
+preserve. Falsiness covers all three states that mean "the caller named none":
+the empty-string default, None, and an absent attribute. Do not tidy it back.
+
 Not required when the inference server is started through this project's own
 launcher (`weight_sync_bench.phase3.attach`), which rebinds the dict in-process
 before `server()` reads it. It IS required when prime-rl's own orchestration
@@ -21,7 +32,7 @@ spawns the inference process, because an in-process rebind does not reach it.
 
 --- a/src/prime_rl/inference/vllm/server.py
 +++ b/src/prime_rl/inference/vllm/server.py
-@@ -229,8 +229,14 @@
+@@ -229,8 +229,20 @@
      assert args is not None
      validate_parsed_serve_args(args)
  
@@ -33,7 +44,13 @@ spawns the inference process, because an in-process rebind does not reach it.
 +    # so a caller-supplied value reached the namespace and was then discarded.
 +    # Honoring it lets a worker extension that SUBCLASSES the transport's own
 +    # worker be substituted, which keeps the weight-update RPCs intact.
-+    if getattr(args, "worker_extension_cls", None) is None:
++    #
++    # Falsiness, not `is None`: vLLM 0.28 defaults this field to the empty
++    # STRING. An `is None` guard never fires, so this fallback never runs and a
++    # server started without an explicit value binds NO worker extension at all
++    # -- including prime-rl's own, whose update_weights and liveness RPCs then
++    # answer NotImplementedError.
++    if not getattr(args, "worker_extension_cls", None):
 +        args.worker_extension_cls = WORKER_EXTENSION_CLS[config.weight_broadcast.type]
  
      if args.headless or args.api_server_count < 1:

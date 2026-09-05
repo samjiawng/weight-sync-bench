@@ -62,6 +62,17 @@ corruption. At layer 0 the corruption is ~1.5 to 3.0 and at other layers ~0.16
 to 1.05, against an offset of 2.3e-3, so the offset is a rounding effect on the
 break means rather than a confound. This is stated in the artifact rather than
 left for a reader to work out.
+
+THE FLOOR IS SCOPED TO ONE GPU, AND THAT IS CHECKED THREE TIMES
+----------------------------------------------------------------
+`MATCHED_ENGINE_FLAGS` pins every flag this comparison depends on except the
+attention backend, which vLLM selects by compute capability. The device name
+therefore stands proxy for the kernel and so for the accumulation order this
+floor measures, which makes it a scope CONDITION rather than provenance. Every
+leg observes it (`running_device_name`), `assemble` refuses to combine legs that
+disagree (`_check_devices`), and `load_serving_floor` raises when the running
+device is not the recorded one. The last is the one with teeth: without it the
+artifact merely states its scope and nothing enforces it.
 """
 
 from __future__ import annotations
@@ -102,6 +113,43 @@ LAYERS = (0, 13)
 
 CLEAN_LABEL = "clean"
 
+# The floor is valid for ONE GPU architecture, and this is where that is said.
+#
+# `MATCHED_ENGINE_FLAGS` pins dtype, eager execution, chunked prefill, prefix
+# caching, the batched-token budget, logprobs_mode, seed and TP degree. It does
+# not pin the attention backend, and prime-rl sets none either: vLLM selects it
+# by compute capability. So the kernel this floor is a floor for is chosen by
+# the GPU, and the kernel sets the accumulation order -- which is the entire
+# quantity being measured. The device name therefore stands proxy for the
+# kernel, and a floor read on another architecture is wrong rather than stale.
+#
+# Capacity is not the reason. Qwen3-0.6B at gpu_memory_utilization 0.85 fits on
+# any modern card, so the 80 GB has nothing to do with it.
+SCOPE_CONDITION = (
+    "This floor is valid only on the recorded device_name. MATCHED_ENGINE_FLAGS "
+    "pins every engine flag this comparison depends on EXCEPT the attention "
+    "backend, which neither this project nor prime-rl sets and which vLLM "
+    "selects by compute capability. The device name therefore stands proxy for "
+    "the attention kernel, and the kernel sets the reduction order this floor "
+    "measures. Capacity is not involved: the model fits on any modern card."
+)
+
+# Why the device name is a scope condition and gpu_name in `environment` is not
+# the same statement. Recorded because a reader seeing the same string twice
+# would otherwise take the second for a duplicate.
+SCOPE_VS_PROVENANCE = (
+    "`environment.gpu_name` is provenance: it says where this ran. `scope."
+    "device_name` is a condition: it says where the number may be used. They "
+    "carry the same string and answer different questions, and only the second "
+    "one raises -- see `load_serving_floor`."
+)
+
+REGENERATE_COMMAND = (
+    "bash scripts/phase3_floor_legs.sh, then .venv-phase3/bin/python -m "
+    "weight_sync_bench.phase3.serving_floor --assemble --leg-dir <leg dir>"
+)
+
+
 # Launch arguments naming the weights. These are the ONLY tokens allowed to
 # differ between the clean leg and a break leg, because pointing at a corrupted
 # copy is what a break leg is.
@@ -120,6 +168,26 @@ def leg_name(case: str, layer: int | None) -> str:
     injected into it; a break leg carries its layer because the same case at a
     different depth is a different measurement, not a repeat of one."""
     return CLEAN_LABEL if case == CLEAN_LABEL else f"{case}@layer{layer}"
+
+
+def running_device_name() -> str:
+    """The name of the CUDA device this process would run on.
+
+    Read per leg rather than once into the artifact's environment block. A
+    per-leg invariant asserted from a single global is exactly the move this
+    project exists to catch: seven legs are seven measurements, and whether they
+    ran on one device is something to observe, not to assume from the fact that
+    one driver started them.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        raise ServingFloorError(
+            "no CUDA device is present, so there is no device name to record "
+            "or to check the floor's scope against. This floor is scoped to the "
+            "GPU it was measured on; see SCOPE_CONDITION."
+        )
+    return torch.cuda.get_device_name()
 
 
 def _token_batches(
@@ -169,6 +237,9 @@ def measure_served_leg(
     recorded verbatim. "Started the same way" is prose, and prose cannot be
     checked after the fact; argv can. `assemble` compares them.
 
+    Records the device this leg ran on, read here rather than copied from a
+    global. `assemble` refuses to combine legs that disagree.
+
     Records the resolved-config readback and a self-consistency check. Self
     consistency is not decoration: a server that does not reproduce its own bits
     is not measuring the boundary, it is measuring its own nondeterminism, and
@@ -207,6 +278,9 @@ def measure_served_leg(
         "self_consistent": self_consistent,
         "served_model": engine.model,
         "launch": launch,
+        # Beside the launch command, and for the same reason: "the same GPU"
+        # is prose until a leg records which one it ran on.
+        "device_name": running_device_name(),
         "corruption": (
             verify_corruption(source_dir, engine.model, case, layer)
             if case != CLEAN_LABEL and source_dir
@@ -255,6 +329,7 @@ def measure_direct_reference(
         "prompts": prompts,
         "seq_len": seq_len,
         "seed": seed,
+        "device_name": running_device_name(),
         "resolved": resolved,
         "logits": logits,
     }
@@ -588,11 +663,280 @@ def _check_launches(floor_leg: dict[str, Any], break_legs: list[dict[str, Any]])
     }
 
 
+DEPTH_FINDING = REPO_ROOT / "tolerance" / "phase2a_layer_depth_finding.json"
+
+# The clean leg misread during this sweep's first attempt, before the launcher
+# derived every flag from MATCHED_ENGINE_FLAGS. Kept as a literal because it is
+# a historical observation that no longer reproduces: the launcher it came from
+# no longer exists. See scripts/phase3_serve.py's `build_args`.
+MISREAD_CLEAN_LEG_MEAN = 3.71e-2
+
+
+def _flag_near_miss() -> dict[str, Any]:
+    """The near-miss worth recording: a broken measurement's wrong answer agreed
+    with a number already in the repo.
+
+    A launcher that passed only some of `MATCHED_ENGINE_FLAGS` left the server
+    compiling and capturing CUDA graphs while the direct engine ran eager. The
+    clean leg then read 3.71e-2 instead of 2.3e-3 -- and 3.71e-2 lands within
+    half a percent of phase 2a's TP1-vs-TP2 floor mean at the same repetitions,
+    batch and sequence length. A reader who had that number in mind would have
+    found the wrong one plausible, which is exactly why the coincidence is
+    written down rather than left as a fixed bug.
+
+    2a's mean is READ from its artifact at the matching configuration, never
+    retyped, so the coincidence cannot become a stale claim about a number that
+    has since moved.
+    """
+    from .engine_probe import floor_mean
+
+    reference = floor_mean(
+        seq_len=DEFAULT_SEQ_LEN, batch=DEFAULT_PROMPTS, repetitions=DEFAULT_REPETITIONS
+    )
+    return {
+        "what": (
+            "A launcher that passed only part of MATCHED_ENGINE_FLAGS left the "
+            "served side compiling and capturing CUDA graphs while the direct "
+            "side ran under enforce_eager, so the clean leg measured a launcher "
+            "difference rather than the serving boundary."
+        ),
+        "misread_clean_leg_mean": MISREAD_CLEAN_LEG_MEAN,
+        "phase2a_floor_mean": reference,
+        "phase2a_floor_artifact": "phase2a_bf16_floor_v2.json",
+        "phase2a_configuration": {
+            "repetitions": DEFAULT_REPETITIONS,
+            "batch": DEFAULT_PROMPTS,
+            "seq_len": DEFAULT_SEQ_LEN,
+        },
+        "relative_difference": abs(MISREAD_CLEAN_LEG_MEAN - reference) / reference,
+        "why_it_was_worth_catching": (
+            "The wrong answer agreed with a number already in the repo: the "
+            "misread clean leg landed within half a percent of phase 2a's floor "
+            "mean, a quantity measured across a DIFFERENT boundary. A broken "
+            "measurement that lands on a familiar value is the one a reader "
+            "checks least."
+        ),
+        "fix": (
+            "scripts/phase3_serve.py derives every argument from "
+            "MATCHED_ENGINE_FLAGS rather than listing a subset, so the two "
+            "sides read one definition of the matched set."
+        ),
+    }
+
+
+def _depth_reference(deep_layer: int) -> dict[str, Any] | None:
+    """2a's numbers at the same layer pair, read from its committed artifact.
+
+    Read rather than quoted: the note below compares this run against 2a, and a
+    comparison built from retyped numbers goes stale the moment 2a is
+    re-measured, silently and in the one field a reader consults for the summary.
+    """
+    if not DEPTH_FINDING.is_file():
+        return None
+    data = json.loads(DEPTH_FINDING.read_text())
+    rows = {row["layer"]: row for row in data["sweep"]["results"]}
+    if deep_layer not in rows or GATE_LAYER not in rows:
+        return None
+    floor_mean_2a = data["sweep"]["floor_mean_deviation"]
+    deep = rows[deep_layer]
+    weakest = min(
+        value for case, value in deep.items() if case in set(BREAK_CASES)
+    )
+    return {
+        "artifact": DEPTH_FINDING.name,
+        "layer0_over_deep_ratios": {
+            case: ratios.get(str(deep_layer))
+            for case, ratios in data["layer0_over_layerN_ratios"].items()
+        },
+        "verdicts": {
+            f"layer_{GATE_LAYER}": rows[GATE_LAYER]["verdict"].lower(),
+            f"layer_{deep_layer}": deep["verdict"].lower(),
+        },
+        "floor_mean_deviation": floor_mean_2a,
+        "weakest_over_floor_at_deep_layer": weakest / floor_mean_2a,
+    }
+
+
+def _gate_carried_forward(
+    gates: dict[str, Any], break_stats: list[dict[str, Any]], floor: dict[str, Any]
+) -> dict[str, Any]:
+    """The summary field, written FROM the measurement.
+
+    Its previous version was written from an expectation -- that layer 13 would
+    fail -- and then contradicted `gate.layer_13.verdict` in the same artifact.
+    Generating it closes that by construction: every clause below is computed
+    from the legs this run produced, so the note cannot disagree with the
+    numbers beside it.
+    """
+    gate_key = f"layer_{GATE_LAYER}"
+    verdicts = {name: block["verdict"] for name, block in sorted(gates.items())}
+    deep_layers = sorted(
+        block["layer"] for block in gates.values() if block["layer"] != GATE_LAYER
+    )
+    required = SAFETY_FACTOR * GATE_MARGIN
+    floor_mean = floor["mean_deviation"]
+
+    means = {}
+    for stat in break_stats:
+        means.setdefault(stat["layer"], {})[stat["case"]] = stat["mean_deviation"]
+
+    sentences = []
+    if verdicts and len(set(verdicts.values())) == 1:
+        only = next(iter(verdicts.values()))
+        sentences.append(
+            f"All measured layers ({', '.join(sorted(gates))}) {only}: "
+            + ", ".join(f"{name} {verdict}" for name, verdict in verdicts.items())
+            + "."
+        )
+    else:
+        sentences.append(
+            "Verdicts differ by layer: "
+            + ", ".join(f"{name} {verdict}" for name, verdict in verdicts.items())
+            + "."
+        )
+    sentences.append(
+        f"The gate the served path carries forward is layer {GATE_LAYER}'s, "
+        f"which is the position phase 2a calibrated at; it is not a general gate."
+    )
+
+    depth_ratios: dict[str, dict[str, float]] = {}
+    reference = None
+    for deep in deep_layers:
+        ratios = {
+            case: means[GATE_LAYER][case] / means[deep][case]
+            for case in sorted(means.get(GATE_LAYER, {}))
+            if case in means.get(deep, {}) and means[deep][case]
+        }
+        depth_ratios[f"layer_{GATE_LAYER}_over_layer_{deep}"] = ratios
+        reference = _depth_reference(deep)
+        here = " / ".join(f"{value:.1f}x" for _, value in sorted(ratios.items()))
+        # Whether the step is reproduced is read off the ratios, not asserted:
+        # every case shallower-than-deeper is the step 2a recorded, and a run
+        # where it did not hold has to be able to say so in this same field.
+        step = "is reproduced" if ratios and all(v > 1 for v in ratios.values()) else (
+            "is NOT reproduced"
+        )
+        if reference and all(reference["layer0_over_deep_ratios"].values()):
+            there = " / ".join(
+                f"{value:.1f}x"
+                for _, value in sorted(reference["layer0_over_deep_ratios"].items())
+            )
+            sentences.append(
+                f"The depth step in break MAGNITUDE {step}: layer "
+                f"{GATE_LAYER} over layer {deep} is {here} by case here, against "
+                f"phase 2a's {there} at the same pair."
+            )
+        else:
+            sentences.append(
+                f"The depth step in break MAGNITUDE {step}: layer "
+                f"{GATE_LAYER} over layer {deep} is {here} by case here."
+            )
+
+        weakest_here = min(means[deep].values()) / floor_mean
+        if reference:
+            there_verdict = reference["verdicts"][f"layer_{deep}"]
+            carried = (
+                "did NOT carry over from"
+                if verdicts.get(f"layer_{deep}") != there_verdict
+                else "agrees with"
+            )
+            sentences.append(
+                f"The VERDICT is floor-relative and {carried} "
+                f"phase 2a, where layer {deep} was "
+                f"{there_verdict}. Against its own "
+                f"floor the weakest case at layer {deep} separates by "
+                f"{weakest_here:.0f}x here and by "
+                f"{reference['weakest_over_floor_at_deep_layer']:.1f}x in 2a, "
+                f"against the same required {required}x. The break magnitudes "
+                "are the smaller part of that difference; the served floor "
+                "being tighter is the larger."
+            )
+        else:
+            sentences.append(
+                f"The VERDICT is floor-relative: at layer {deep} the weakest "
+                f"case separates from this floor by {weakest_here:.0f}x against "
+                f"a required {required}x."
+            )
+
+    ratios_to_gate = {
+        name: block["weakest_case_ratio_to_gate"]
+        for name, block in sorted(gates.items())
+        if block["weakest_case_ratio_to_gate"] is not None
+    }
+    if len(ratios_to_gate) > 1:
+        ordered = sorted(ratios_to_gate.items(), key=lambda item: item[1])
+        tightest, widest = ordered[0], ordered[-1]
+        sentences.append(
+            "The layers are not interchangeable: "
+            + ", ".join(f"{name} clears the gate by {value:.2f}x"
+                        for name, value in ordered)
+            + f". A floor regression flips {tightest[0]} first and leaves "
+            f"{widest[0]} untouched, so the better number is not the general one."
+        )
+
+    return {
+        "layer": GATE_LAYER,
+        "verdict": gates.get(gate_key, {}).get("verdict"),
+        "verdicts": verdicts,
+        "weakest_case_ratio_to_gate": ratios_to_gate,
+        "break_magnitude_depth_ratios": depth_ratios,
+        "phase2a_reference": reference,
+        "required_separation_over_floor": required,
+        "note": " ".join(sentences),
+        "note_is": (
+            "generated from this run's legs, not written from an expectation. "
+            "An earlier hand-written version of this field stated a failing "
+            "verdict at the deeper layer while the measurement beside it said "
+            "pass."
+        ),
+    }
+
+
+def _check_devices(legs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Every leg was measured on the same GPU, observed per leg.
+
+    On the same footing as `_check_launches`, and for the same reason. The
+    attention backend is the one thing `MATCHED_ENGINE_FLAGS` does not pin --
+    vLLM picks it by compute capability -- so two legs on two architectures ran
+    two different kernels, and their difference would be a kernel difference
+    wearing the serving boundary's name.
+
+    A leg with no device name is refused rather than skipped. Skipping it would
+    let a leg measured somewhere else average into a floor that then states one
+    device in its scope block, which is the failure this check exists for.
+    """
+    missing = [leg["leg"] for leg in legs if not leg.get("device_name")]
+    if missing:
+        raise ServingFloorError(
+            f"legs {missing} record no device name, so they cannot be shown to "
+            "have run on the device this floor is scoped to. Re-measure them, or "
+            f"they are not legs of this floor. {REGENERATE_COMMAND}"
+        )
+
+    first = legs[0]
+    for leg in legs[1:]:
+        if leg["device_name"] != first["device_name"]:
+            raise ServingFloorError(
+                f"leg {leg['leg']!r} was measured on {leg['device_name']!r} but "
+                f"leg {first['leg']!r} was measured on {first['device_name']!r}. "
+                "These legs do not compose into one floor: vLLM selects the "
+                "attention backend by compute capability, so a difference "
+                "between them is a kernel difference rather than the serving "
+                "boundary this floor measures."
+            )
+    return {
+        "device_name": first["device_name"],
+        "per_leg": {leg["leg"]: leg["device_name"] for leg in legs},
+        "matches_across_legs": True,
+    }
+
+
 def assemble(
     leg_dir: Path,
     artifact_path: Path = ARTIFACT,
     environment_note: str | None = None,
     snapshot: dict[str, Any] | None = None,
+    attention_backend: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Read the leg files, build the floor, apply phase 2's gate at each layer."""
     import torch
@@ -625,6 +969,11 @@ def assemble(
         )
 
     launches = _check_launches(floor_leg, [legs[n] for n in sorted(legs)])
+
+    # The reference is included: it is the side every deviation is measured
+    # against, so a reference built on another device would put the kernel
+    # difference into every number here rather than into one leg.
+    devices = _check_devices([reference, floor_leg, *(legs[n] for n in sorted(legs))])
 
     # The served side has to be serving the weights the direct reference was
     # built from, or the comparison is about checkpoints rather than about the
@@ -726,18 +1075,26 @@ def assemble(
         },
         "excluded_legs": inconsistent,
         "gate": gates,
-        "gate_carried_forward": {
-            "layer": GATE_LAYER,
-            "verdict": gates.get(f"layer_{GATE_LAYER}", {}).get("verdict"),
-            "note": (
-                "This is the gate at one layer, not a general one. Phase 2a's "
-                "depth sweep found the gate passes at layer 0 and fails at 7, "
-                "13, 20 and 27 as a step rather than a gradient; the layer 13 "
-                "legs here reproduce that across the serving boundary. A "
-                "failing verdict at layer 13 is a recorded result, not an "
-                "unresolved defect."
+        "gate_carried_forward": _gate_carried_forward(gates, break_stats, floor),
+        "scope": {
+            "device_name": devices["device_name"],
+            "condition": SCOPE_CONDITION,
+            "why_not_provenance": SCOPE_VS_PROVENANCE,
+            "checked_by": (
+                "`load_serving_floor` raises when the recorded device name "
+                "differs from the running one, and `assemble` refuses to "
+                "combine legs that disagree. Fail, not warn: this follows the "
+                "precedent phase 1 sets for a value under the repo's own "
+                "control, where a mismatch makes the number wrong rather than "
+                "merely stale, not the environment block's precedent of warning "
+                "on a version bump."
             ),
+            "per_leg": devices["per_leg"],
+            "matches_across_legs": devices["matches_across_legs"],
+            "attention_backend": attention_backend,
+            "regenerate": REGENERATE_COMMAND,
         },
+        "flag_near_miss": _flag_near_miss(),
         "offset_vs_corruption": (
             "Break means contain the serving-boundary offset as well as the "
             "corruption. The offset is the floor mean above; the corruption is "
@@ -761,6 +1118,57 @@ def assemble(
 
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     artifact_path.write_text(json.dumps(report, indent=2) + "\n")
+    return report
+
+
+# --------------------------------------------------------------------------- #
+# The point of use.
+# --------------------------------------------------------------------------- #
+
+
+def load_serving_floor(
+    path: Path = ARTIFACT, device_name: str | None = None
+) -> dict[str, Any]:
+    """The committed floor, refused if the running GPU is not the one it is for.
+
+    Shaped after phase 1's `load_threshold`: the measured number lives in its
+    artifact and is read from it, never inlined by a caller. The whole report is
+    returned rather than the bare threshold because this floor is a threshold, a
+    gate at two layers and a scope condition, and a caller handed only the number
+    would have to reopen the file to learn which layer it holds at.
+
+    RAISES ON A MISMATCH, and does not warn. The environment block's precedent
+    is the other way -- a torch or numpy bump warns, because it weakens
+    provenance without making the number wrong -- but the device belongs with
+    the values phase 1 hard-fails on instead: it is chosen deliberately at rental
+    time, it is under this repo's control, and a floor read on another
+    architecture is wrong rather than stale. vLLM picks the attention backend by
+    compute capability, so another device is another kernel and another reduction
+    order, which is the whole quantity this floor measures.
+
+    `device_name` is an argument so the raise path is testable without a GPU.
+    Left unset it probes the running device, and having no CUDA device at all is
+    itself a refusal rather than a pass: nothing can be shown to be in scope.
+    """
+    report = json.loads(Path(path).read_text())
+    scope = report.get("scope")
+    if not scope or not scope.get("device_name"):
+        raise ServingFloorError(
+            f"{Path(path).name} carries no scope block, so the device it was "
+            "measured on is not recorded and nothing can be checked against it. "
+            f"Regenerate: {REGENERATE_COMMAND}"
+        )
+
+    recorded = scope["device_name"]
+    running = device_name if device_name is not None else running_device_name()
+    if running != recorded:
+        raise ServingFloorError(
+            f"{Path(path).name} was measured on {recorded!r} and this process "
+            f"is running on {running!r}. The floor does not transfer: vLLM "
+            "selects the attention backend by compute capability, so the "
+            "reduction order this floor measures is not the one running here. "
+            f"Measure a floor on this device instead: {REGENERATE_COMMAND}"
+        )
     return report
 
 
@@ -798,6 +1206,9 @@ def main() -> None:
                         help="how the environment this ran on came to exist")
     parser.add_argument("--snapshot-json", type=str, default=None,
                         help="JSON record of the environment snapshot attempt")
+    parser.add_argument("--attention-backend-json", type=str, default=None,
+                        help="JSON evidence of the attention backend a server "
+                             "log named, recorded in `scope`")
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
@@ -807,10 +1218,12 @@ def main() -> None:
             args.out or ARTIFACT,
             args.environment_note,
             json.loads(args.snapshot_json) if args.snapshot_json else None,
+            json.loads(args.attention_backend_json) if args.attention_backend_json else None,
         )
         print(json.dumps({"floor": report["floor"]["mean_deviation"],
                           "threshold": report["floor"]["threshold"],
-                          "gate": {k: v["verdict"] for k, v in report["gate"].items()}},
+                          "gate": {k: v["verdict"] for k, v in report["gate"].items()},
+                          "scope": {"device_name": report["scope"]["device_name"]}},
                          indent=2))
         return
 

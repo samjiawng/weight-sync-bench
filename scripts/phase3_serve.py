@@ -21,21 +21,25 @@ args=[...])`, with exactly one field set afterwards -- the one the CLI has no
 syntax for. Nothing here hand-assembles a config object; a hand-built config
 would be a fourth thing to keep in sync with the pin.
 
-THE WORKER EXTENSION IS PASSED EXPLICITLY, and that is forced rather than
-preferred. `patches/01` made prime-rl's assignment conditional on
-`getattr(args, "worker_extension_cls", None) is None`, but vLLM 0.28's default
-for that field is the empty STRING, not None. The guard therefore never fires,
-the fallback to `WORKER_EXTENSION_CLS[transport]` never runs, and a server
-started without an explicit value binds no worker extension at all -- the
-`/collective_rpc` route reaches the worker and the worker answers
-`NotImplementedError: Method 'install_logits_hook' is not implemented`.
-Measured here, on the first leg of this sweep.
+THE WORKER EXTENSION IS PASSED EXPLICITLY, and that is now chosen rather than
+forced. It was forced once: `patches/01` guarded prime-rl's assignment with
+`getattr(args, "worker_extension_cls", None) is None`, and vLLM 0.28 defaults
+that field to the empty STRING, so the guard never fired, the fallback to
+`WORKER_EXTENSION_CLS[transport]` never ran, and a server started without an
+explicit value bound no worker extension at all -- the `/collective_rpc` route
+reached the worker and the worker answered `NotImplementedError: Method
+'install_logits_hook' is not implemented`. Measured here, on the first leg of
+this sweep.
 
-Passing the qualname through the passthrough is exactly what the recorded
-attachment run did, so this measures the configuration that run validated
-rather than a new one. The name comes from `composed_worker_qualname`, so it is
-still the per-transport name. `bind_worker_extension` is exercised by the
-composition tests at both transports instead of by this launcher.
+The guard now tests falsiness, so it does fire on that default and a server
+started without an explicit value gets prime-rl's own per-transport class. This
+script still passes the qualname, and that is the point of passing it: it is the
+COMPOSED class, prime-rl's weight-update worker with the logits hook mixed in,
+which prime-rl's fallback would not select. It is also the configuration the
+recorded attachment run validated, so this measures that one rather than a new
+one. The name comes from `composed_worker_qualname`, so it is still the
+per-transport name. `bind_worker_extension` is exercised by the composition
+tests at both transports instead of by this launcher.
 """
 
 from __future__ import annotations
@@ -68,8 +72,9 @@ def build_args(model: str, port: int, broadcast_type: str) -> list[str]:
             "--weight-broadcast.type", broadcast_type]
     for key, value in MATCHED_ENGINE_FLAGS.items():
         args += [f"--vllm.{key.replace('_', '-')}", str(value)]
-    # See the module docstring: without this the patched guard leaves the field
-    # at vLLM's empty-string default and no extension is bound.
+    # See the module docstring: the guard now fires on vLLM's empty-string
+    # default, so this is what selects the COMPOSED class rather than the
+    # per-transport class prime-rl would fall back to.
     args += ["--vllm.worker-extension-cls", composed_worker_qualname(broadcast_type)]
     return args
 

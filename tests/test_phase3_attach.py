@@ -19,6 +19,7 @@ import json
 import shutil
 import subprocess
 import tarfile
+import types
 import urllib.request
 from pathlib import Path
 
@@ -128,7 +129,76 @@ def test_patches_apply_cleanly_to_a_fresh_extraction(tmp_path):
     ast.parse(patched.read_text())  # the patched file still parses
     text = patched.read_text()
     assert "/collective_rpc" in text
-    assert 'getattr(args, "worker_extension_cls", None) is None' in text
+    assert 'if not getattr(args, "worker_extension_cls", None):' in text
+
+
+# --- what patch 01's guard actually covers ----------------------------------
+
+
+def _guard_condition() -> str:
+    """The condition patch 01 adds, lifted out of the diff itself.
+
+    Read from the patch rather than restated, for the reason every other
+    anti-drift check in this repo exists: a copy of the condition written here
+    would keep passing after the patch changed. prime-rl is not installed on
+    this box, so the branch cannot be exercised by calling `server()`; the
+    condition is the whole of what changed, and it is evaluable on its own.
+    """
+    patch = next(p for p in patch_paths() if p.name.startswith("01-"))
+    added = [
+        line[1:]
+        for line in patch.read_text().splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    ]
+    guards = [
+        line.strip()
+        for line in added
+        if line.strip().startswith("if ") and "worker_extension_cls" in line
+    ]
+    assert len(guards) == 1, guards
+    return guards[0][len("if ") :].rstrip(":")
+
+
+def _falls_through_to_prime_rls_own_selection(args) -> bool:
+    return bool(eval(_guard_condition(), {"getattr": getattr}, {"args": args}))  # noqa: S307
+
+
+def test_the_guard_fires_on_vllms_empty_string_default():
+    """THE case. vLLM 0.28 defaults `worker_extension_cls` to the empty STRING,
+    so `... is None` never fires: prime-rl's fallback never runs and a server
+    started without an explicit value binds NO worker extension at all, its own
+    weight-update RPCs included.
+
+    A test covering only `None` passes against the defective patch and is worse
+    than no test, because it reads as coverage. This one is the empty string.
+    """
+    args = types.SimpleNamespace(worker_extension_cls="")
+    assert _falls_through_to_prime_rls_own_selection(args)
+
+
+def test_the_guard_fires_on_none_and_on_an_absent_attribute():
+    """The other two spellings of "the caller named none"."""
+    assert _falls_through_to_prime_rls_own_selection(
+        types.SimpleNamespace(worker_extension_cls=None)
+    )
+    assert _falls_through_to_prime_rls_own_selection(types.SimpleNamespace())
+
+
+def test_the_guard_does_not_fire_on_a_caller_supplied_class():
+    """The branch the patch exists for: a supplied qualname survives instead of
+    being overwritten by the transport's default."""
+    args = types.SimpleNamespace(
+        worker_extension_cls=engine_probe.composed_worker_qualname("filesystem")
+    )
+    assert not _falls_through_to_prime_rls_own_selection(args)
+
+
+def test_the_patch_header_names_the_empty_string_as_the_reason():
+    """The next reader will otherwise tidy the falsiness test back to `is None`,
+    which is how the defect got in."""
+    patch = next(p for p in patch_paths() if p.name.startswith("01-"))
+    text = patch.read_text()
+    assert "empty" in text.lower() and "falsiness" in text.lower()
 
 
 # --- lazy-import discipline -------------------------------------------------

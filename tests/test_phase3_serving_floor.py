@@ -35,6 +35,11 @@ def _logits(offset: float):
 
 BASE_ARGV = ["rl-inference", "@", "cfg.toml", "--model", "/w/clean", "--tp", "1"]
 
+# The legs' recorded device. A stand-in name, not the measured one: these legs
+# are synthetic, and borrowing the real device name would make a fixture look
+# like a measurement.
+DEVICE = "SYNTHETIC-GPU-0"
+
 
 def _launch(model="/w/clean"):
     return {"command": [t if t != "/w/clean" else model for t in BASE_ARGV],
@@ -49,10 +54,11 @@ def _corruption(case, layer):
 
 
 def _leg(name, case, layer, offset, side="served", self_consistent=True,
-         launch=None, served_model=None):
+         launch=None, served_model=None, device_name=DEVICE):
     launch = launch if launch is not None else _launch()
     return {
         "leg": name, "case": case, "layer": layer, "side": side,
+        "device_name": device_name,
         "repetitions": REPS, "prompts": PROMPTS, "seq_len": ROWS, "seed": 0,
         "self_consistent": self_consistent,
         "served_model": served_model or sf._weights_path(launch),
@@ -398,3 +404,154 @@ def test_the_artifact_carries_the_verification_per_leg(tmp_path):
     verification = report["corruption_verification"]
     assert len(verification) == len(bf16_floor.BREAK_CASES) * 2
     assert all(v["verified"] for v in verification.values())
+
+
+# --- the GPU the floor is scoped to ----------------------------------------
+#
+# The device name is a scope CONDITION, not provenance: vLLM selects the
+# attention backend by compute capability and MATCHED_ENGINE_FLAGS pins
+# everything else, so the device stands proxy for the kernel and therefore for
+# the accumulation order the floor measures. These tests cover the two places
+# that enforce it -- the assembly, and the loader.
+
+
+def test_the_artifact_states_the_device_the_floor_is_valid_for(tmp_path):
+    report = sf.assemble(_write_legs(tmp_path), tmp_path / "a.json")
+    scope = report["scope"]
+    assert scope["device_name"] == DEVICE
+    assert scope["matches_across_legs"] is True
+    # Every leg, including the direct reference each deviation is measured
+    # against: a reference on another device would put the kernel difference
+    # into all seven numbers rather than into one leg.
+    assert set(scope["per_leg"]) == {
+        "direct_reference", "clean",
+        *(sf.leg_name(case, layer)
+          for layer in (0, 13) for case in bf16_floor.BREAK_CASES),
+    }
+    assert "attention backend" in scope["condition"]
+
+
+def test_legs_on_two_devices_are_refused_naming_both(tmp_path):
+    """Two devices are two attention kernels, so the difference between such
+    legs is a kernel difference wearing the serving boundary's name."""
+    _write_legs(tmp_path)
+    path = tmp_path / "case2_oproj_col_permute@layer0.pt"
+    leg = torch.load(path, weights_only=False)
+    leg["device_name"] = "SOME-OTHER-GPU"
+    torch.save(leg, path)
+    with pytest.raises(sf.ServingFloorError) as excinfo:
+        sf.assemble(tmp_path, tmp_path / "a.json")
+    message = str(excinfo.value)
+    assert "SOME-OTHER-GPU" in message and DEVICE in message
+    assert "case2_oproj_col_permute@layer0" in message
+
+
+def test_a_leg_that_recorded_no_device_is_refused_rather_than_skipped(tmp_path):
+    """Skipping it would let a leg measured elsewhere average into a floor whose
+    scope block then names one device."""
+    _write_legs(tmp_path)
+    path = tmp_path / "clean.pt"
+    leg = torch.load(path, weights_only=False)
+    leg["device_name"] = None
+    torch.save(leg, path)
+    with pytest.raises(sf.ServingFloorError, match="record no device name"):
+        sf.assemble(tmp_path, tmp_path / "a.json")
+
+
+def test_the_loader_returns_the_floor_on_the_device_it_was_measured_on(tmp_path):
+    out = tmp_path / "a.json"
+    written = sf.assemble(_write_legs(tmp_path), out)
+    loaded = sf.load_serving_floor(out, device_name=DEVICE)
+    assert loaded["floor"]["threshold"] == written["floor"]["threshold"]
+    assert loaded["scope"]["device_name"] == DEVICE
+
+
+def test_the_loader_raises_on_another_device_naming_both_and_the_regenerate(tmp_path):
+    """The bullet with teeth. Without this the artifact states its scope and
+    nothing enforces it."""
+    out = tmp_path / "a.json"
+    sf.assemble(_write_legs(tmp_path), out)
+    with pytest.raises(sf.ServingFloorError) as excinfo:
+        sf.load_serving_floor(out, device_name="NVIDIA H100 80GB HBM3")
+    message = str(excinfo.value)
+    assert DEVICE in message and "NVIDIA H100 80GB HBM3" in message
+    assert "serving_floor --assemble" in message
+
+
+def test_the_loader_raises_when_there_is_no_cuda_device(monkeypatch, tmp_path):
+    """Not a pass. With no device present nothing can be shown to be in scope,
+    and the number would be read anyway."""
+    out = tmp_path / "a.json"
+    sf.assemble(_write_legs(tmp_path), out)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(sf.ServingFloorError, match="no CUDA device"):
+        sf.load_serving_floor(out)
+
+
+def test_the_loader_refuses_an_artifact_with_no_scope_block(tmp_path):
+    """An artifact predating the scope condition. Reading it as unconditional is
+    what the raise exists to prevent."""
+    out = tmp_path / "a.json"
+    report = sf.assemble(_write_legs(tmp_path), out)
+    report.pop("scope")
+    out.write_text(json.dumps(report))
+    with pytest.raises(sf.ServingFloorError, match="no scope block"):
+        sf.load_serving_floor(out, device_name=DEVICE)
+
+
+# --- the summary field, written from the measurement ------------------------
+
+
+def test_the_summary_note_carries_the_verdicts_it_sits_beside(tmp_path):
+    """Its previous version was written from an expectation and contradicted
+    `gate.layer_13.verdict` in the same artifact."""
+    report = sf.assemble(_write_legs(tmp_path), tmp_path / "a.json")
+    carried = report["gate_carried_forward"]
+    assert carried["verdicts"] == {
+        name: block["verdict"] for name, block in report["gate"].items()
+    }
+    assert "layer_13 pass" in carried["note"]
+
+
+def test_the_summary_note_follows_a_failing_layer_rather_than_an_expectation(tmp_path):
+    report = sf.assemble(
+        _write_legs(tmp_path, floor_offset=1e-3, break_offsets={0: 2.0, 13: 1e-3}),
+        tmp_path / "a.json",
+    )
+    carried = report["gate_carried_forward"]
+    assert carried["verdicts"] == {"layer_0": "pass", "layer_13": "fail"}
+    assert "layer_13 fail" in carried["note"]
+
+
+def test_the_note_states_the_depth_step_in_magnitude_from_this_run(tmp_path):
+    """2.0 at layer 0 against 0.5 at layer 13 is a 4x step by construction."""
+    report = sf.assemble(_write_legs(tmp_path), tmp_path / "a.json")
+    ratios = report["gate_carried_forward"]["break_magnitude_depth_ratios"]
+    assert set(ratios) == {"layer_0_over_layer_13"}
+    for case, value in ratios["layer_0_over_layer_13"].items():
+        assert value == pytest.approx(4.0, rel=1e-3), case
+    assert "MAGNITUDE" in report["gate_carried_forward"]["note"]
+
+
+def test_the_note_says_the_two_layers_are_not_interchangeable(tmp_path):
+    report = sf.assemble(_write_legs(tmp_path), tmp_path / "a.json")
+    carried = report["gate_carried_forward"]
+    assert set(carried["weakest_case_ratio_to_gate"]) == {"layer_0", "layer_13"}
+    assert "not interchangeable" in carried["note"]
+    assert "floor regression flips layer_13" in carried["note"]
+
+
+def test_the_flag_near_miss_is_recorded_against_the_2a_artifact(tmp_path):
+    """The coincidence is the point: a broken measurement's wrong answer agreed
+    with a number already in the repo, so it read as plausible."""
+    from weight_sync_bench.phase3.engine_probe import floor_mean
+
+    report = sf.assemble(_write_legs(tmp_path), tmp_path / "a.json")
+    near_miss = report["flag_near_miss"]
+    assert near_miss["phase2a_floor_mean"] == floor_mean(
+        seq_len=sf.DEFAULT_SEQ_LEN,
+        batch=sf.DEFAULT_PROMPTS,
+        repetitions=sf.DEFAULT_REPETITIONS,
+    )
+    assert near_miss["misread_clean_leg_mean"] == pytest.approx(3.71e-2)
+    assert near_miss["relative_difference"] < 0.005
