@@ -861,6 +861,31 @@ Support at minimum FSDP-style full sharding on dim 0 and a Megatron-style TP con
 reshard cost is asymmetric between source and destination and that asymmetry is the part nobody
 documents.
 
+### A layout table states whether it describes storage or execution
+
+The asymmetry above is only measurable if the source is genuinely sharded, and making it sharded
+runs into something the layout vocabulary cannot currently say. FSDP-style full sharding is
+`Shard(0)` on every parameter, the fused `qkv` included. On fused `qkv` that placement is correct
+as storage, because nothing executes attention from an FSDP shard, it all-gathers first, and the
+gather is exact. The same placement on the same parameter is a layout bug as a tensor-parallel
+execution layout, and it is the one break case 1 injects. Same placement, same tensor, opposite
+verdicts, and a table has no field that distinguishes them.
+
+So a table carries its role, and the role changes what is legal. The distinction has one concrete
+consequence beyond documentation: GQA divisibility is an execution constraint and not a storage
+one. At a TP degree where `n_kv_heads` does not divide the degree there is no per-rank KV
+partition to run attention over, which is why constructing that execution table raises. A storage
+table at the same degree is fine, because its shards are only ever gathered. A source holder must
+therefore be able to shard at degrees where no execution table exists, and today it cannot.
+
+The validation is deliberately one-directional. A storage table refuses the placements that exist
+only to describe execution, since no FSDP source uses them and a table that does is mislabeled.
+An execution table refuses nothing new. That asymmetry is not an oversight: a validator that
+rejected wrong execution placements would make a wrong execution table unconstructible, and the
+break cases depend on a wrong layout producing wrong numbers rather than a construction error. A
+layout error that a validator can catch is not the kind of layout error this harness exists to
+catch.
+
 ---
 
 ## 2d. Transports
