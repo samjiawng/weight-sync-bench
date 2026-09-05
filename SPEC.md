@@ -1029,6 +1029,23 @@ consequences of what those flags do:
   leaving the first suspect flag unexercised. Force chunking by lowering the batched-token
   budget on that leg or by raising the prompt past it.
 
+**Measured: under prime-rl's flag profile the extraction does not deviate, it stops.** Run on one
+A100 at the point the bf16 floor was swept (20 repetitions, batch 4, seq_len 32, TP=1) with the
+batched-token budget forced to 16 against a 32-token prompt, the prime-rl-profile leg raised on
+its first prompt: two `compute_logits` captures of 16 positions each, where the extraction path
+requires exactly one multi-position capture per prompt. Chunked prefill produces one capture per
+scheduling chunk, and the raise is itself the runtime proof that chunking occurred; the resolved
+scheduler config predicted it independently, and the floor-profile leg resolved the default
+budget with chunking off, so both profiles took as configured. No deviation exists, so the
+threshold question does not arise in either direction, and no re-measurement of the floor under
+prime-rl's flags is possible or planned: there is no reading to measure.
+
+The consequence lands on the attachment, not on the threshold. Gating a live prime-rl loop
+requires reconciling the two profiles first, by serving with chunked prefill disabled or by
+making the hook chunk-aware. Which one is a design question the attachment stage answers; until
+it does, the 2a threshold stands unchallenged rather than confirmed, because nothing has been
+measured against it under the serving profile.
+
 The probe also establishes the hardware floor for everything after it. prime-rl separates trainer
 and inference into distinct processes with distinct GPUs, so its smallest end-to-end loop is one
 trainer GPU plus one inference GPU. There is no single-GPU end-to-end configuration.

@@ -100,6 +100,27 @@ DEFAULT_SEED = 0
 # deliberate -- it isolates the mechanism instead of also changing the input.
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 16
 
+# How the GPU box's environment for this probe is built, recorded in every
+# artifact this module writes so the numbers carry the install that produced
+# them.
+#
+# The editable install carries `--no-deps` deliberately, and the reason is a
+# fact about the measurement rather than a packaging convenience. This package
+# pins numpy==2.4.6 for phase 1; vllm==0.28.0 caps numpy below 2.4 through
+# mistral-common; the two do not resolve together, which is exactly the
+# conflict pyproject.toml's own comment predicts. Nothing under phase2/ or
+# phase3/ imports numpy -- the only uses are `.numpy()` on torch tensors -- so
+# the pin is not load-bearing for the code this probe runs. Dropping it leaves
+# the environment at the numpy vLLM resolves, which is the environment the
+# committed 2a floor was measured in, and that is the property the rule's
+# division by that floor mean depends on. `--no-deps` puts this package on the
+# path without its dependency set; it changes no pin in pyproject.toml.
+INSTALL_COMMANDS = (
+    "uv venv --python 3.12 .venv-phase3",
+    "uv pip install --python .venv-phase3 vllm==0.28.0 safetensors huggingface-hub",
+    "uv pip install --python .venv-phase3 -e . --no-deps",
+)
+
 # Substring of the error `retrieve_and_clear_logits` raises when more than one
 # multi-position capture arrives. Matched on rather than parsed: it is the
 # runtime signature of chunking having actually happened.
@@ -191,6 +212,45 @@ PRIME_RL_WORKER_EXTENSIONS = {
 }
 DEFAULT_BROADCAST_TYPE = "filesystem"
 
+# vLLM's resolved SchedulerConfig names this field `enable_chunked_prefill`.
+# An earlier version of this module read `chunked_prefill_enabled` through a
+# `getattr(..., None)` default, and on a real engine that silently produced
+# None on BOTH legs: `config_predicts_chunking` came out False, and with it
+# `chunking_evidence.confirmed`, while the run was in fact chunking a 32-token
+# prompt into two 16-token pieces and the extraction was raising over it. That
+# is the same failure class as the `hasattr(torch.cuda, "driver_version")`
+# guard backfilled in tolerance/phase2a_bf16_floor_v2.json and the old
+# `shape[0] >= expected_min_positions` check in collective_logits: a loose
+# guard around instrumentation that degrades to a plausible-looking value
+# instead of saying its assumption no longer holds. It is also precisely the
+# error this probe is supposed to be immune to -- a probe that silently fails
+# to record the condition it is testing.
+SCHEDULER_BUDGET_ATTR = "max_num_batched_tokens"
+SCHEDULER_CHUNKED_PREFILL_ATTR = "enable_chunked_prefill"
+
+
+class SchedulerIntrospectionError(RuntimeError):
+    """A resolved vLLM config does not carry an attribute this probe reads."""
+
+
+def read_resolved(config: Any, attr: str) -> Any:
+    """Reads one attribute off a resolved vLLM config object, strictly.
+
+    No default. A missing attribute means vLLM renamed or removed it, which
+    invalidates what this probe claims to observe; raising says so at the read
+    site instead of writing a None that a reader cannot distinguish from a
+    genuine "chunking is off".
+    """
+    if not hasattr(config, attr):
+        available = sorted(n for n in dir(config) if not n.startswith("_"))
+        raise SchedulerIntrospectionError(
+            f"{type(config).__name__} has no attribute {attr!r}; this probe reads "
+            f"it to report whether chunking actually occurred. vLLM may have "
+            f"renamed it. Available: {available}"
+        )
+    return getattr(config, attr)
+
+
 COMPOSED_WORKER_NAME = "PrimeRlLogitsHookWorker"
 COMPOSED_WORKER_QUALNAME = f"{__name__}.{COMPOSED_WORKER_NAME}"
 
@@ -234,9 +294,14 @@ def compose_worker_extension(broadcast_type: str = DEFAULT_BROADCAST_TYPE) -> ty
         config = getattr(self, "vllm_config", None) or get_current_vllm_config()
         scheduler = config.scheduler_config
         cache = getattr(config, "cache_config", None)
+        # Key names are this repo's vocabulary and stay stable for `attach.py`;
+        # what changed is the vLLM attribute each is read FROM. Strict reads --
+        # see SCHEDULER_CHUNKED_PREFILL_ATTR.
         return {
-            "max_num_batched_tokens": getattr(scheduler, "max_num_batched_tokens", None),
-            "chunked_prefill_enabled": getattr(scheduler, "chunked_prefill_enabled", None),
+            "max_num_batched_tokens": read_resolved(scheduler, SCHEDULER_BUDGET_ATTR),
+            "chunked_prefill_enabled": read_resolved(
+                scheduler, SCHEDULER_CHUNKED_PREFILL_ATTR
+            ),
             "enable_prefix_caching": getattr(cache, "enable_prefix_caching", None),
         }
 
@@ -329,8 +394,8 @@ def scheduler_evidence(llm: Any, prompt_len: int) -> dict[str, Any]:
     """
     scheduler = llm.llm_engine.vllm_config.scheduler_config
     return evidence_from_scheduler(
-        getattr(scheduler, "max_num_batched_tokens", None),
-        getattr(scheduler, "chunked_prefill_enabled", None),
+        read_resolved(scheduler, SCHEDULER_BUDGET_ATTR),
+        read_resolved(scheduler, SCHEDULER_CHUNKED_PREFILL_ATTR),
         prompt_len,
     )
 
@@ -398,7 +463,18 @@ def _run_worker(
         for rep, tokens in enumerate(token_batches):
             torch.manual_seed(seed + rep)
             all_reps.append(torch.stack([run_one_prompt(llm, row) for row in tokens.tolist()], dim=0))
-    except RuntimeError as exc:
+    except Exception as exc:
+        # Caught on the MESSAGE, not the type. `retrieve_and_clear_logits`
+        # raises a RuntimeError, but it raises it inside a worker, and vLLM's
+        # executor re-raises across that boundary as a bare
+        # `Exception("Call to collective_rpc method failed: ...")` with the
+        # original text carried in the message and the original type lost. An
+        # `except RuntimeError` here therefore never fires on a real engine:
+        # it lets the one outcome this probe most needs to record escape as a
+        # crash. The marker check is what keeps this narrow -- anything whose
+        # text does not carry it is re-raised untouched, so an unrelated
+        # failure still fails the run instead of being recorded as a chunking
+        # result.
         if MULTI_CAPTURE_MARKER not in str(exc):
             raise
         extraction_error = str(exc)
@@ -586,6 +662,31 @@ def apply_rule(
     }
 
 
+def probe_environment() -> dict[str, Any]:
+    """Phase 2's provenance block, plus what this phase's environment adds.
+
+    `numpy` is recorded here because this environment is built by an install
+    that deliberately does not resolve this package's numpy pin (see
+    INSTALL_COMMANDS), so which numpy actually landed is a property of the
+    measurement rather than an incidental version. Phase 2's `environment()`
+    records no numpy field; it is read, never edited, from here.
+
+    Imported inside the function, like every other heavyweight import in this
+    package, so the module stays importable where the dependency is absent.
+    """
+    block = dict(environment())
+    try:
+        import numpy
+
+        block["numpy"] = numpy.__version__
+    except ImportError:
+        # Not silently None: an absent numpy is a fact about the environment,
+        # and stating it beats a field that reads as "not recorded".
+        block["numpy"] = "not installed"
+    block["install"] = list(INSTALL_COMMANDS)
+    return block
+
+
 def run_probe(
     seq_len: int = DEFAULT_SEQ_LEN,
     seed: int = DEFAULT_SEED,
@@ -669,7 +770,7 @@ def run_probe(
             "extraction path attaches to a running prime-rl server."
         ),
         "prime_rl_pin": provenance(),
-        "environment": environment(),
+        "environment": probe_environment(),
     }
 
     # Looked up in both branches: even when no deviation exists, recording what

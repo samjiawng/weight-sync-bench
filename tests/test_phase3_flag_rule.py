@@ -8,6 +8,7 @@ function rather than a paragraph: the decision can be checked without the run.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -213,14 +214,38 @@ def test_only_the_prime_rl_profile_carries_the_budget():
 
 
 def _stub_engine(max_num_batched_tokens, chunked_prefill_enabled=True):
-    """Enough of an engine for `scheduler_evidence` to read a resolved config."""
+    """Enough of an engine for `scheduler_evidence` to read a resolved config.
+
+    The attribute names here are vLLM's, not this repo's, and that matters: a
+    stub is free to spell them any way it likes and still pass, which is how an
+    earlier version of these tests stayed green while the real read returned
+    None off a real engine. `engine_probe` names them in one place so the stub
+    cannot drift from the thing it stands in for.
+    """
     scheduler = SimpleNamespace(
-        max_num_batched_tokens=max_num_batched_tokens,
-        chunked_prefill_enabled=chunked_prefill_enabled,
+        **{
+            engine_probe.SCHEDULER_BUDGET_ATTR: max_num_batched_tokens,
+            engine_probe.SCHEDULER_CHUNKED_PREFILL_ATTR: chunked_prefill_enabled,
+        }
     )
     return SimpleNamespace(
         llm_engine=SimpleNamespace(vllm_config=SimpleNamespace(scheduler_config=scheduler))
     )
+
+
+def test_a_renamed_scheduler_attribute_raises_instead_of_reading_as_no_chunking():
+    """The regression that produced a wrong artifact: the probe read an
+    attribute vLLM does not have, `getattr`'s default turned the miss into
+    None, and `config_predicts_chunking` came out False on a run that was
+    demonstrably chunking. A missing attribute is now a raise, so the failure
+    announces itself rather than being recorded as evidence of its opposite."""
+    scheduler = SimpleNamespace(**{engine_probe.SCHEDULER_BUDGET_ATTR: 16})
+    engine = SimpleNamespace(
+        llm_engine=SimpleNamespace(vllm_config=SimpleNamespace(scheduler_config=scheduler))
+    )
+    with pytest.raises(engine_probe.SchedulerIntrospectionError) as exc:
+        scheduler_evidence(engine, prompt_len=32)
+    assert engine_probe.SCHEDULER_CHUNKED_PREFILL_ATTR in str(exc.value)
 
 
 def test_forced_budget_predicts_chunking_into_two_chunks():
@@ -255,3 +280,25 @@ def test_scheduler_evidence_survives_a_missing_budget():
     evidence = scheduler_evidence(_stub_engine(None), prompt_len=32)
     assert evidence["expected_chunks"] is None
     assert evidence["config_predicts_chunking"] is False
+
+
+def test_scheduler_attribute_names_match_vllms_own_fields():
+    """Guards the names against the installed vLLM, where one is installed.
+
+    Every other test here reads a stub, and a stub spells the attribute
+    whatever way the test does -- so the whole file stayed green while the name
+    was wrong against the real SchedulerConfig. This is the only check that
+    consults vLLM itself. It skips rather than fails on a CPU-only box, which
+    is where the suite normally runs; the GPU box is where it has teeth.
+    """
+    vllm_config = pytest.importorskip("vllm.config")
+    fields = {f.name for f in dataclasses.fields(vllm_config.SchedulerConfig)}
+    for attr in (
+        engine_probe.SCHEDULER_BUDGET_ATTR,
+        engine_probe.SCHEDULER_CHUNKED_PREFILL_ATTR,
+    ):
+        assert attr in fields, (
+            f"engine_probe reads SchedulerConfig.{attr}, which this vLLM does not "
+            f"define. Chunking-related fields it does define: "
+            f"{sorted(f for f in fields if 'chunk' in f or 'prefill' in f)}"
+        )

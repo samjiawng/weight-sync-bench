@@ -1,0 +1,145 @@
+{
+  "probe": "engine flag profile differential",
+  "question": "Do prime-rl's engine flags change the logits the correctness gate reads, relative to the profile the bf16 floor was measured under?",
+  "measurement": {
+    "repetitions": 20,
+    "batch": 4,
+    "seq_len": 32,
+    "seed": 0,
+    "tensor_parallel_size": 1
+  },
+  "chunking_evidence": {
+    "config_predicts_chunking": true,
+    "multi_capture_observed_at_runtime": true,
+    "confirmed": true,
+    "prime_rl_scheduler": {
+      "resolved_max_num_batched_tokens": 16,
+      "resolved_chunked_prefill_enabled": true,
+      "prompt_len": 32,
+      "budget_below_prompt_len": true,
+      "expected_chunks": 2,
+      "config_predicts_chunking": true
+    },
+    "floor_scheduler": {
+      "resolved_max_num_batched_tokens": 40960,
+      "resolved_chunked_prefill_enabled": false,
+      "prompt_len": 32,
+      "budget_below_prompt_len": false,
+      "expected_chunks": 1,
+      "config_predicts_chunking": false
+    },
+    "extraction_error": "Call to collective_rpc method failed: expected at most one compute_logits capture with more than one position (chunked prefill and prefix caching should both be disabled, and prompt length should be under compute_prompt_logprobs_with_chunking's CHUNK_SIZE=1024 -- see design points 3a/3b), got 2: shapes [(16, 151936), (16, 151936)]. Either the constructor flags did not take effect, the prompt exceeded 1024 positions, or an unexpected extra compute_logits call happened."
+  },
+  "engine_flags": {
+    "enforce_eager": {
+      "prime_rl": false,
+      "prime_rl_source": "packages/prime-rl-configs/src/prime_rl/configs/inference.py:66",
+      "floor": true,
+      "floor_source": "src/weight_sync_bench/phase2/collective_logits.py:1257"
+    },
+    "enable_chunked_prefill": {
+      "prime_rl": null,
+      "prime_rl_note": "not a prime-rl config field at all; vLLM's default applies, i.e. on",
+      "prime_rl_source": "packages/prime-rl-configs/src/prime_rl/configs/inference.py (absent)",
+      "floor": false,
+      "floor_source": "src/weight_sync_bench/phase2/collective_logits.py:1273"
+    },
+    "enable_prefix_caching": {
+      "prime_rl": null,
+      "prime_rl_note": "declared but defaults to None, which omits it; vLLM's default applies, i.e. on",
+      "prime_rl_source": "packages/prime-rl-configs/src/prime_rl/configs/inference.py:105",
+      "floor": false,
+      "floor_source": "src/weight_sync_bench/phase2/collective_logits.py:1274"
+    },
+    "dtype": {
+      "prime_rl": "auto",
+      "prime_rl_note": "'auto' resolves to bfloat16 for a bf16 checkpoint, so this row is expected to agree in practice",
+      "prime_rl_source": "packages/prime-rl-configs/src/prime_rl/configs/inference.py:60",
+      "floor": "bfloat16",
+      "floor_source": "src/weight_sync_bench/phase2/collective_logits.py:1256"
+    },
+    "attention_backend": {
+      "prime_rl": null,
+      "prime_rl_note": "prime-rl sets no vLLM attention backend; its attention-backend selection is trainer-side (ring attention) and does not reach the inference engine",
+      "prime_rl_source": "no inference-side setting at the pinned commit",
+      "floor": null,
+      "floor_note": "also unset; vLLM's default applies on both sides",
+      "floor_source": "src/weight_sync_bench/phase2/collective_logits.py:1253-1279"
+    },
+    "max_num_batched_tokens": {
+      "prime_rl": 16,
+      "prime_rl_note": "forced down by this probe, not a prime-rl setting: prime-rl leaves vLLM's default, which is far above the probe's prompt length, so chunked prefill would be nominally enabled and never actually chunk",
+      "prime_rl_source": "this module (DEFAULT_MAX_NUM_BATCHED_TOKENS)",
+      "floor": null,
+      "floor_note": "unset; irrelevant with chunked prefill disabled",
+      "floor_source": "src/weight_sync_bench/phase2/collective_logits.py:1253-1279"
+    },
+    "worker_extension_cls": {
+      "prime_rl": "prime_rl.inference.vllm.worker.filesystem.FileSystemWeightUpdateWorker",
+      "prime_rl_note": "set unconditionally from WORKER_EXTENSION_CLS keyed by weight_broadcast.type, whose default is 'filesystem'; any caller-supplied value reaching the namespace is overwritten",
+      "prime_rl_source": "src/prime_rl/inference/vllm/server.py:233 (dict at :59-63)",
+      "floor": "weight_sync_bench.phase2.collective_logits.LogitsHookWorkerExtension",
+      "floor_source": "src/weight_sync_bench/phase2/collective_logits.py:1278"
+    }
+  },
+  "differing_flags_worst_first": [
+    "enable_chunked_prefill",
+    "enable_prefix_caching",
+    "enforce_eager",
+    "dtype"
+  ],
+  "attribution_order": [
+    "enable_chunked_prefill",
+    "enable_prefix_caching",
+    "enforce_eager"
+  ],
+  "serving_path_limitation": "Both legs are in-process LLM objects. prime-rl's actual sampler is behind its OpenAI API server and was NOT exercised: at the pinned commit prime-rl constructs no in-process LLM, and overwrites any caller-supplied worker_extension_cls at src/prime_rl/inference/vllm/server.py:233. This probe therefore isolates the flag difference only. It is not evidence that the extraction path attaches to a running prime-rl server.",
+  "prime_rl_pin": {
+    "prime_rl_commit": "26b3131d2716a4f8210b165df584b83b4bc54f61",
+    "prime_rl_tag": "v0.9.1.dev41",
+    "prime_rl_pinned_date": "2026-09-04",
+    "vllm_version": "0.28.0",
+    "source": "https://api.github.com/repos/PrimeIntellect-ai/prime-rl/tarball/26b3131d2716a4f8210b165df584b83b4bc54f61"
+  },
+  "environment": {
+    "python": "3.12.3",
+    "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.39",
+    "machine": "x86_64",
+    "model": "Qwen/Qwen3-0.6B",
+    "pinned_vllm_version": "0.28.0",
+    "dtype": "torch.bfloat16",
+    "torch": "2.13.0+cu130",
+    "cuda_available": true,
+    "gpu_count": 1,
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "cuda_version": "13.0",
+    "driver_version": "595.91.07",
+    "vllm_installed_version": "0.28.0",
+    "git_commit": "2c3cade976f802ba131a0c149d81f987b99f45be",
+    "numpy": "2.3.5",
+    "install": [
+      "uv venv --python 3.12 .venv-phase3",
+      "uv pip install --python .venv-phase3 vllm==0.28.0 safetensors huggingface-hub",
+      "uv pip install --python .venv-phase3 -e . --no-deps"
+    ]
+  },
+  "outcome": "extraction_raised_under_chunking",
+  "bit_identical": null,
+  "rule_applied": {
+    "rule": "Report the flag deviation as a multiple of the phase 2a floor mean at the MATCHING configuration. At or below 1x, prime-rl's flags move the logits no more than the dtype-and-reduction-order floor already does, and phase 3 keeps the 2a threshold. Above 1x, the flag profile is a source of deviation the existing threshold was never measured against, so the threshold does not transfer and the floor is re-measured under prime-rl's flag profile (SAFETY_FACTOR unchanged) into its own artifact.",
+    "deviation_mean": null,
+    "floor_mean": 0.03725002110004425,
+    "multiple_of_floor_mean": null,
+    "branch": "extraction_raised_under_chunking",
+    "threshold_transfers": false,
+    "extraction_error": "Call to collective_rpc method failed: expected at most one compute_logits capture with more than one position (chunked prefill and prefix caching should both be disabled, and prompt length should be under compute_prompt_logprobs_with_chunking's CHUNK_SIZE=1024 -- see design points 3a/3b), got 2: shapes [(16, 151936), (16, 151936)]. Either the constructor flags did not take effect, the prompt exceeded 1024 positions, or an unexpected extra compute_logits call happened.",
+    "implication": "No deviation exists, so the rule's two branches do not apply. The phase 2 extraction path cannot read logits under prime-rl's flag profile once chunked prefill actually chunks; the profiles have to be reconciled before any threshold question can be asked. The raise is itself runtime proof that chunking occurred."
+  },
+  "floor_reference": {
+    "artifact": "phase2a_bf16_floor_v2.json",
+    "repetitions": 20,
+    "batch": 4,
+    "seq_len": 32,
+    "mean_deviation": 0.03725002110004425
+  }
+}
