@@ -722,6 +722,20 @@ this investigation produced along the way and lands on a sharper, still-unresolv
   far they are from layer 0. Of the five layers tested, **layer 0 is the only one where the
   current gate would catch an injected bug of this shape and magnitude.** Calibrating at layer 0
   is calibrating at the single most favorable position in the model, not a representative one.
+  Read that as a statement about this floor and these constants rather than about depth in
+  general, for the reason the next bullet measures.
+- **Updated at a different boundary, and the update is about the floor rather than about depth.**
+  Phase 3's serving-boundary floor (`tolerance/phase3_serving_floor.json`) runs these same three
+  injections at layers 0 and 13 against a floor of 2.233e-03, roughly 17x tighter than the
+  3.898e-02 measured here, because a served-against-direct comparison holds one sharding and
+  changes only the scheduling path while TP1 against TP2 changes the reduction topology itself.
+  The depth step survives: layer 0 over layer 13 is 10.3x / 7.8x / 5.8x by case there against
+  7.8x / 9.7x / 6.0x here, the same effect at the same layer pair. The verdict does not survive,
+  and a verdict is floor-relative. Layer 13's separation ratio is 4.15x here and 119x there
+  against the same required 30, so one injection at one layer fails this gate and clears that
+  one. A tighter comparison buys back depth coverage this one cannot reach. Layer 0 still clears
+  by far more than layer 13 does even there, 31x against 3.8x, so the step is real and the two
+  layers are not interchangeable.
 - **Next test, not yet run**: a finer sweep over layers `{1,...,6}` to locate the step precisely
   (a hard boundary right after layer 0, versus a fast-but-continuous drop over the first few
   layers), and direct residual-stream-norm instrumentation during a forward pass to test the
@@ -1102,6 +1116,16 @@ indistinguishable from a break case that failed to separate.
 
 The attachment question is resolved, so 2c through 2e are unblocked on design. The serving-boundary
 floor is what stands between them and a gate, and it is a measurement rather than a decision.
+
+Measured: the floor is 2.233e-03 mean over 20 repetitions, and the gate passes at both layers.
+Threshold 3.349e-02 by the same rule phase 2a uses, gate 6.698e-02 at the same margin. Layer 0
+clears by 31x on its weakest case, layer 13 by 3.8x. The reproduction that makes the number
+trustworthy is that the first cell uses the same tokens the attachment check used and returns its
+mean and its worst element to every digit, on an environment rebuilt from scratch with a
+different install. The floor is recorded under one weight-broadcast transport and one tensor
+parallel degree, and it is 17x tighter than the floor phase 2a measured, which is what changes
+the depth verdict recorded in 2a's limitation above. The pass at layer 13 has roughly an eighth
+of layer 0's headroom, so a floor regression would flip it and leave layer 0 untouched.
 
 ### 3b. 2c through 2e, against the engine the probe validated
 

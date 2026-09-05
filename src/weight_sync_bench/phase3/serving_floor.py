@@ -588,7 +588,12 @@ def _check_launches(floor_leg: dict[str, Any], break_legs: list[dict[str, Any]])
     }
 
 
-def assemble(leg_dir: Path, artifact_path: Path = ARTIFACT) -> dict[str, Any]:
+def assemble(
+    leg_dir: Path,
+    artifact_path: Path = ARTIFACT,
+    environment_note: str | None = None,
+    snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Read the leg files, build the floor, apply phase 2's gate at each layer."""
     import torch
 
@@ -746,6 +751,12 @@ def assemble(leg_dir: Path, artifact_path: Path = ARTIFACT) -> dict[str, Any]:
         },
         "prime_rl_pin": provenance(),
         "environment": probe_environment(),
+        # Whether this run was made on the same environment as an earlier one is
+        # not derivable from the version block: the same versions reinstalled
+        # are a different build. The runner states it, and a later run can then
+        # say whether it is on this environment or another re-creation.
+        "environment_provenance": environment_note,
+        "environment_snapshot": snapshot,
     }
 
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
@@ -783,11 +794,20 @@ def main() -> None:
         default=None,
         help="JSON {command: [...], cwd: ...} that started the server for this leg",
     )
+    parser.add_argument("--environment-note", type=str, default=None,
+                        help="how the environment this ran on came to exist")
+    parser.add_argument("--snapshot-json", type=str, default=None,
+                        help="JSON record of the environment snapshot attempt")
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
     if args.assemble:
-        report = assemble(args.leg_dir, args.out or ARTIFACT)
+        report = assemble(
+            args.leg_dir,
+            args.out or ARTIFACT,
+            args.environment_note,
+            json.loads(args.snapshot_json) if args.snapshot_json else None,
+        )
         print(json.dumps({"floor": report["floor"]["mean_deviation"],
                           "threshold": report["floor"]["threshold"],
                           "gate": {k: v["verdict"] for k, v in report["gate"].items()}},

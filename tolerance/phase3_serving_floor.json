@@ -1,0 +1,1078 @@
+{
+  "probe": "serving-boundary floor and break separation",
+  "question": "How far apart are logits extracted through a running server and logits from a directly constructed engine on the same checkpoint, and does an injected layout break still clear that distance?",
+  "broadcast_type": "filesystem",
+  "repetitions": 20,
+  "prompts": 4,
+  "seq_len": 32,
+  "seed": 0,
+  "seed_note": "Only the token seed varies across repetitions. The model seed that phase 2a's seed_base also moves is inert here: the weights come from a real checkpoint rather than from an initializer.",
+  "matched_flags": {
+    "dtype": "bfloat16",
+    "enforce_eager": true,
+    "enable_chunked_prefill": false,
+    "enable_prefix_caching": false,
+    "max_num_batched_tokens": 40960,
+    "gpu_memory_utilization": 0.85,
+    "logprobs_mode": "raw_logits",
+    "seed": 0,
+    "tensor_parallel_size": 1
+  },
+  "launch": {
+    "command": [
+      "/workspace/weight-sync-bench/.venv-phase3/bin/python",
+      "/workspace/weight-sync-bench/scripts/phase3_serve.py",
+      "--model",
+      "/workspace/hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+      "--port",
+      "8000",
+      "--broadcast-type",
+      "filesystem"
+    ],
+    "cwd": "/workspace/weight-sync-bench",
+    "normalized_argv_matches_across_legs": true,
+    "weights_args_normalized_out": [
+      "--inference.model.name",
+      "--model",
+      "--model-dir"
+    ]
+  },
+  "served_weights": {
+    "per_leg": {
+      "clean": {
+        "served_model": "/workspace/hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+        "launch_weights_path": "/workspace/hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+        "loaded_what_its_launch_named": true
+      },
+      "case1_qkv_head_permute@layer0": {
+        "served_model": "/opt/wsb/ckpt/case1_qkv_head_permute-layer0",
+        "launch_weights_path": "/opt/wsb/ckpt/case1_qkv_head_permute-layer0",
+        "loaded_what_its_launch_named": true,
+        "distinct_from_clean_checkpoint": true
+      },
+      "case1_qkv_head_permute@layer13": {
+        "served_model": "/opt/wsb/ckpt/case1_qkv_head_permute-layer13",
+        "launch_weights_path": "/opt/wsb/ckpt/case1_qkv_head_permute-layer13",
+        "loaded_what_its_launch_named": true,
+        "distinct_from_clean_checkpoint": true
+      },
+      "case2_oproj_col_permute@layer0": {
+        "served_model": "/opt/wsb/ckpt/case2_oproj_col_permute-layer0",
+        "launch_weights_path": "/opt/wsb/ckpt/case2_oproj_col_permute-layer0",
+        "loaded_what_its_launch_named": true,
+        "distinct_from_clean_checkpoint": true
+      },
+      "case2_oproj_col_permute@layer13": {
+        "served_model": "/opt/wsb/ckpt/case2_oproj_col_permute-layer13",
+        "launch_weights_path": "/opt/wsb/ckpt/case2_oproj_col_permute-layer13",
+        "loaded_what_its_launch_named": true,
+        "distinct_from_clean_checkpoint": true
+      },
+      "case3_norm_permute@layer0": {
+        "served_model": "/opt/wsb/ckpt/case3_norm_permute-layer0",
+        "launch_weights_path": "/opt/wsb/ckpt/case3_norm_permute-layer0",
+        "loaded_what_its_launch_named": true,
+        "distinct_from_clean_checkpoint": true
+      },
+      "case3_norm_permute@layer13": {
+        "served_model": "/opt/wsb/ckpt/case3_norm_permute-layer13",
+        "launch_weights_path": "/opt/wsb/ckpt/case3_norm_permute-layer13",
+        "loaded_what_its_launch_named": true,
+        "distinct_from_clean_checkpoint": true
+      }
+    },
+    "direct_reference_model_dir": "/workspace/hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+    "clean_leg_matches_direct_reference": true,
+    "identity_is": "the model id /v1/models reports, which for a local checkpoint is its path. This catches a server pointed at the wrong DIRECTORY. It is not a hash: two directories with the same name and different contents are indistinguishable to it.",
+    "note": "The clean served leg and the direct reference have to be the same weights, or the floor is a checkpoint difference wearing a boundary's name. Each break leg has to be on its own corrupted copy, or it reads as a case that does not separate."
+  },
+  "resolved_configs": {
+    "served": {
+      "max_num_batched_tokens": 40960,
+      "chunked_prefill_enabled": false,
+      "enable_prefix_caching": false
+    },
+    "direct": {
+      "max_num_batched_tokens": 40960,
+      "chunked_prefill_enabled": false,
+      "enable_prefix_caching": false
+    },
+    "agree": true,
+    "differing": {}
+  },
+  "floor": {
+    "leg": "clean",
+    "case": "clean",
+    "layer": null,
+    "self_consistent": true,
+    "cells": [
+      {
+        "max": 0.062091827392578125,
+        "median": 0.0014280080795288086,
+        "mean": 0.0023245790507644415
+      },
+      {
+        "max": 0.061901092529296875,
+        "median": 0.001370072364807129,
+        "mean": 0.0022099444177001715
+      },
+      {
+        "max": 0.0620269775390625,
+        "median": 0.0013440847396850586,
+        "mean": 0.002186720259487629
+      },
+      {
+        "max": 0.062404632568359375,
+        "median": 0.0013655424118041992,
+        "mean": 0.002237013541162014
+      },
+      {
+        "max": 0.06217002868652344,
+        "median": 0.0013207197189331055,
+        "mean": 0.0021360754035413265
+      },
+      {
+        "max": 0.06224632263183594,
+        "median": 0.001420736312866211,
+        "mean": 0.002293016528710723
+      },
+      {
+        "max": 0.06249237060546875,
+        "median": 0.0014073848724365234,
+        "mean": 0.00233514909632504
+      },
+      {
+        "max": 0.061779022216796875,
+        "median": 0.0013653039932250977,
+        "mean": 0.002204693155363202
+      },
+      {
+        "max": 0.06240081787109375,
+        "median": 0.0013692378997802734,
+        "mean": 0.00223001791164279
+      },
+      {
+        "max": 0.0552978515625,
+        "median": 0.0013675689697265625,
+        "mean": 0.0022134692408144474
+      },
+      {
+        "max": 0.06245613098144531,
+        "median": 0.0013866424560546875,
+        "mean": 0.0022428377997130156
+      },
+      {
+        "max": 0.05984306335449219,
+        "median": 0.0013790130615234375,
+        "mean": 0.0022350039798766375
+      },
+      {
+        "max": 0.06192779541015625,
+        "median": 0.0013486146926879883,
+        "mean": 0.0021691014990210533
+      },
+      {
+        "max": 0.06152915954589844,
+        "median": 0.0013793110847473145,
+        "mean": 0.0022600439842790365
+      },
+      {
+        "max": 0.06210136413574219,
+        "median": 0.0013880729675292969,
+        "mean": 0.002279869746416807
+      },
+      {
+        "max": 0.06133270263671875,
+        "median": 0.0014035701751708984,
+        "mean": 0.0022943438962101936
+      },
+      {
+        "max": 0.060764312744140625,
+        "median": 0.0013463497161865234,
+        "mean": 0.0021735085174441338
+      },
+      {
+        "max": 0.05303382873535156,
+        "median": 0.0013905763626098633,
+        "mean": 0.0022553226444870234
+      },
+      {
+        "max": 0.061748504638671875,
+        "median": 0.0013713240623474121,
+        "mean": 0.002229435369372368
+      },
+      {
+        "max": 0.060894012451171875,
+        "median": 0.0013321638107299805,
+        "mean": 0.002145352540537715
+      }
+    ],
+    "mean_deviation": 0.0022327749291434886,
+    "max_deviation": 0.06249237060546875,
+    "threshold": 0.033491623937152326,
+    "safety_factor": 15,
+    "rule": "threshold = safety_factor * mean deviation of the served-against-direct comparison on the clean checkpoint. Imported from phase 2 rather than restated, so the two phases cannot drift apart."
+  },
+  "break_cases": [
+    "case1_qkv_head_permute",
+    "case2_oproj_col_permute",
+    "case3_norm_permute"
+  ],
+  "layers": [
+    0,
+    13
+  ],
+  "breaks": [
+    {
+      "leg": "case1_qkv_head_permute@layer0",
+      "case": "case1_qkv_head_permute",
+      "layer": 0,
+      "self_consistent": true,
+      "cells": [
+        {
+          "max": 28.944313049316406,
+          "median": 1.9578423500061035,
+          "mean": 2.463397741317749
+        },
+        {
+          "max": 24.417097091674805,
+          "median": 1.9857670068740845,
+          "mean": 2.5258255004882812
+        },
+        {
+          "max": 27.197763442993164,
+          "median": 1.932337760925293,
+          "mean": 2.4590578079223633
+        },
+        {
+          "max": 29.653669357299805,
+          "median": 2.1666102409362793,
+          "mean": 2.712725877761841
+        },
+        {
+          "max": 33.591957092285156,
+          "median": 2.016225814819336,
+          "mean": 2.586698532104492
+        },
+        {
+          "max": 25.214879989624023,
+          "median": 2.052752733230591,
+          "mean": 2.570094585418701
+        },
+        {
+          "max": 27.859386444091797,
+          "median": 2.0232815742492676,
+          "mean": 2.592991828918457
+        },
+        {
+          "max": 28.15396499633789,
+          "median": 2.216782569885254,
+          "mean": 2.7601559162139893
+        },
+        {
+          "max": 27.26873016357422,
+          "median": 2.0635862350463867,
+          "mean": 2.6338870525360107
+        },
+        {
+          "max": 26.025636672973633,
+          "median": 2.137105703353882,
+          "mean": 2.6716694831848145
+        },
+        {
+          "max": 29.384275436401367,
+          "median": 2.135326862335205,
+          "mean": 2.7143542766571045
+        },
+        {
+          "max": 25.07869529724121,
+          "median": 1.9798352718353271,
+          "mean": 2.491057872772217
+        },
+        {
+          "max": 31.711580276489258,
+          "median": 2.143068313598633,
+          "mean": 2.6979386806488037
+        },
+        {
+          "max": 27.051158905029297,
+          "median": 2.153639316558838,
+          "mean": 2.7005200386047363
+        },
+        {
+          "max": 25.865793228149414,
+          "median": 2.194770336151123,
+          "mean": 2.7803542613983154
+        },
+        {
+          "max": 30.35884666442871,
+          "median": 2.087210178375244,
+          "mean": 2.681900978088379
+        },
+        {
+          "max": 25.698379516601562,
+          "median": 2.065800666809082,
+          "mean": 2.603257417678833
+        },
+        {
+          "max": 24.823816299438477,
+          "median": 2.1047556400299072,
+          "mean": 2.634580135345459
+        },
+        {
+          "max": 28.18144416809082,
+          "median": 2.0480289459228516,
+          "mean": 2.6224775314331055
+        },
+        {
+          "max": 25.73772621154785,
+          "median": 1.9479660987854004,
+          "mean": 2.4822745323181152
+        }
+      ],
+      "mean_deviation": 2.6192610025405885,
+      "max_deviation": 33.591957092285156
+    },
+    {
+      "leg": "case1_qkv_head_permute@layer13",
+      "case": "case1_qkv_head_permute",
+      "layer": 13,
+      "self_consistent": true,
+      "cells": [
+        {
+          "max": 7.413189888000488,
+          "median": 0.19505470991134644,
+          "mean": 0.26443371176719666
+        },
+        {
+          "max": 11.083892822265625,
+          "median": 0.20493125915527344,
+          "mean": 0.28455108404159546
+        },
+        {
+          "max": 3.897116184234619,
+          "median": 0.18543219566345215,
+          "mean": 0.23201386630535126
+        },
+        {
+          "max": 5.202986717224121,
+          "median": 0.18683171272277832,
+          "mean": 0.2492695152759552
+        },
+        {
+          "max": 3.411846160888672,
+          "median": 0.19587695598602295,
+          "mean": 0.2478935569524765
+        },
+        {
+          "max": 5.406005859375,
+          "median": 0.18985962867736816,
+          "mean": 0.25046175718307495
+        },
+        {
+          "max": 6.961573600769043,
+          "median": 0.1948813945055008,
+          "mean": 0.26634299755096436
+        },
+        {
+          "max": 3.8743467330932617,
+          "median": 0.2037794589996338,
+          "mean": 0.2604135572910309
+        },
+        {
+          "max": 3.33181095123291,
+          "median": 0.222312331199646,
+          "mean": 0.28059038519859314
+        },
+        {
+          "max": 4.214587211608887,
+          "median": 0.21280169486999512,
+          "mean": 0.27433353662490845
+        },
+        {
+          "max": 4.374502182006836,
+          "median": 0.1733086109161377,
+          "mean": 0.22238993644714355
+        },
+        {
+          "max": 3.379002809524536,
+          "median": 0.20436334609985352,
+          "mean": 0.2562792897224426
+        },
+        {
+          "max": 3.7136592864990234,
+          "median": 0.1844136267900467,
+          "mean": 0.23339928686618805
+        },
+        {
+          "max": 4.8888773918151855,
+          "median": 0.189933180809021,
+          "mean": 0.25374114513397217
+        },
+        {
+          "max": 2.950465202331543,
+          "median": 0.19041472673416138,
+          "mean": 0.24144679307937622
+        },
+        {
+          "max": 6.271084785461426,
+          "median": 0.19412565231323242,
+          "mean": 0.2573074996471405
+        },
+        {
+          "max": 5.676692008972168,
+          "median": 0.18130922317504883,
+          "mean": 0.23276306688785553
+        },
+        {
+          "max": 5.1424713134765625,
+          "median": 0.2053491771221161,
+          "mean": 0.2614600360393524
+        },
+        {
+          "max": 4.519986152648926,
+          "median": 0.20364803075790405,
+          "mean": 0.2620922029018402
+        },
+        {
+          "max": 3.478255271911621,
+          "median": 0.19500482082366943,
+          "mean": 0.24794034659862518
+        }
+      ],
+      "mean_deviation": 0.25395617857575414,
+      "max_deviation": 11.083892822265625
+    },
+    {
+      "leg": "case2_oproj_col_permute@layer0",
+      "case": "case2_oproj_col_permute",
+      "layer": 0,
+      "self_consistent": true,
+      "cells": [
+        {
+          "max": 24.781352996826172,
+          "median": 1.6727733612060547,
+          "mean": 2.17195200920105
+        },
+        {
+          "max": 26.09479331970215,
+          "median": 1.4912705421447754,
+          "mean": 1.9723385572433472
+        },
+        {
+          "max": 23.91801643371582,
+          "median": 1.4501111507415771,
+          "mean": 1.891183614730835
+        },
+        {
+          "max": 26.6248836517334,
+          "median": 1.6811373233795166,
+          "mean": 2.185896396636963
+        },
+        {
+          "max": 24.458683013916016,
+          "median": 1.39590322971344,
+          "mean": 1.8471860885620117
+        },
+        {
+          "max": 23.724449157714844,
+          "median": 1.5316963195800781,
+          "mean": 1.982415795326233
+        },
+        {
+          "max": 23.804588317871094,
+          "median": 1.4418580532073975,
+          "mean": 1.9247891902923584
+        },
+        {
+          "max": 26.44199562072754,
+          "median": 1.7900347709655762,
+          "mean": 2.302488088607788
+        },
+        {
+          "max": 26.296550750732422,
+          "median": 1.8272576332092285,
+          "mean": 2.351935863494873
+        },
+        {
+          "max": 24.67359733581543,
+          "median": 1.5298686027526855,
+          "mean": 1.9801826477050781
+        },
+        {
+          "max": 20.930953979492188,
+          "median": 1.4456158876419067,
+          "mean": 1.856711506843567
+        },
+        {
+          "max": 24.0047607421875,
+          "median": 1.62115478515625,
+          "mean": 2.111865282058716
+        },
+        {
+          "max": 27.38631248474121,
+          "median": 1.5071649551391602,
+          "mean": 1.980285882949829
+        },
+        {
+          "max": 26.403343200683594,
+          "median": 1.54190993309021,
+          "mean": 2.0334270000457764
+        },
+        {
+          "max": 23.694236755371094,
+          "median": 1.7807897329330444,
+          "mean": 2.2635598182678223
+        },
+        {
+          "max": 25.384145736694336,
+          "median": 1.659066081047058,
+          "mean": 2.151378870010376
+        },
+        {
+          "max": 24.533266067504883,
+          "median": 1.8368752002716064,
+          "mean": 2.3888847827911377
+        },
+        {
+          "max": 24.634952545166016,
+          "median": 1.665226697921753,
+          "mean": 2.1587910652160645
+        },
+        {
+          "max": 28.411767959594727,
+          "median": 1.55265474319458,
+          "mean": 2.051626682281494
+        },
+        {
+          "max": 24.663883209228516,
+          "median": 1.5747416019439697,
+          "mean": 2.089458703994751
+        }
+      ],
+      "mean_deviation": 2.0848178923130036,
+      "max_deviation": 28.411767959594727
+    },
+    {
+      "leg": "case2_oproj_col_permute@layer13",
+      "case": "case2_oproj_col_permute",
+      "layer": 13,
+      "self_consistent": true,
+      "cells": [
+        {
+          "max": 8.233405113220215,
+          "median": 0.1718437671661377,
+          "mean": 0.24820630252361298
+        },
+        {
+          "max": 4.584003448486328,
+          "median": 0.1839238405227661,
+          "mean": 0.2603703439235687
+        },
+        {
+          "max": 3.8146257400512695,
+          "median": 0.19377946853637695,
+          "mean": 0.2607092559337616
+        },
+        {
+          "max": 4.6731109619140625,
+          "median": 0.19729208946228027,
+          "mean": 0.2655291259288788
+        },
+        {
+          "max": 3.7460317611694336,
+          "median": 0.18451464176177979,
+          "mean": 0.24394068121910095
+        },
+        {
+          "max": 6.65150785446167,
+          "median": 0.1862936019897461,
+          "mean": 0.2683807611465454
+        },
+        {
+          "max": 6.301204681396484,
+          "median": 0.2089090347290039,
+          "mean": 0.2966981828212738
+        },
+        {
+          "max": 4.375222206115723,
+          "median": 0.20764946937561035,
+          "mean": 0.27414199709892273
+        },
+        {
+          "max": 3.8619346618652344,
+          "median": 0.2218332290649414,
+          "mean": 0.29109397530555725
+        },
+        {
+          "max": 4.263849258422852,
+          "median": 0.20876097679138184,
+          "mean": 0.28126510977745056
+        },
+        {
+          "max": 5.7927961349487305,
+          "median": 0.19657933712005615,
+          "mean": 0.2654876112937927
+        },
+        {
+          "max": 4.8080363273620605,
+          "median": 0.226218581199646,
+          "mean": 0.30082133412361145
+        },
+        {
+          "max": 3.7653965950012207,
+          "median": 0.17037233710289001,
+          "mean": 0.23316597938537598
+        },
+        {
+          "max": 7.340614318847656,
+          "median": 0.19549110531806946,
+          "mean": 0.27134767174720764
+        },
+        {
+          "max": 3.447044849395752,
+          "median": 0.18882179260253906,
+          "mean": 0.24602575600147247
+        },
+        {
+          "max": 3.8109960556030273,
+          "median": 0.20506072044372559,
+          "mean": 0.26873406767845154
+        },
+        {
+          "max": 3.4980013370513916,
+          "median": 0.16378182172775269,
+          "mean": 0.22299499809741974
+        },
+        {
+          "max": 3.645512580871582,
+          "median": 0.20152831077575684,
+          "mean": 0.2820942997932434
+        },
+        {
+          "max": 4.506706237792969,
+          "median": 0.2081063985824585,
+          "mean": 0.2779337167739868
+        },
+        {
+          "max": 5.100777626037598,
+          "median": 0.19106614589691162,
+          "mean": 0.2585108280181885
+        }
+      ],
+      "mean_deviation": 0.26587259992957113,
+      "max_deviation": 8.233405113220215
+    },
+    {
+      "leg": "case3_norm_permute@layer0",
+      "case": "case3_norm_permute",
+      "layer": 0,
+      "self_consistent": true,
+      "cells": [
+        {
+          "max": 28.076982498168945,
+          "median": 2.4704456329345703,
+          "mean": 3.1144485473632812
+        },
+        {
+          "max": 31.16696548461914,
+          "median": 2.3536906242370605,
+          "mean": 2.9861791133880615
+        },
+        {
+          "max": 29.37368392944336,
+          "median": 2.2600581645965576,
+          "mean": 2.89302396774292
+        },
+        {
+          "max": 31.25272560119629,
+          "median": 2.5169434547424316,
+          "mean": 3.146085739135742
+        },
+        {
+          "max": 28.486690521240234,
+          "median": 2.3814456462860107,
+          "mean": 2.9501147270202637
+        },
+        {
+          "max": 27.70076560974121,
+          "median": 2.2482595443725586,
+          "mean": 2.8021633625030518
+        },
+        {
+          "max": 31.560182571411133,
+          "median": 2.409229278564453,
+          "mean": 2.9962282180786133
+        },
+        {
+          "max": 28.052398681640625,
+          "median": 2.3202972412109375,
+          "mean": 2.96299409866333
+        },
+        {
+          "max": 28.578861236572266,
+          "median": 2.822000503540039,
+          "mean": 3.3760833740234375
+        },
+        {
+          "max": 25.5826358795166,
+          "median": 2.5082950592041016,
+          "mean": 3.1998226642608643
+        },
+        {
+          "max": 28.338083267211914,
+          "median": 2.7376139163970947,
+          "mean": 3.352104902267456
+        },
+        {
+          "max": 27.66831398010254,
+          "median": 2.487328052520752,
+          "mean": 3.081528425216675
+        },
+        {
+          "max": 28.84703826904297,
+          "median": 2.342226505279541,
+          "mean": 2.9989898204803467
+        },
+        {
+          "max": 28.900070190429688,
+          "median": 2.4315690994262695,
+          "mean": 3.029630661010742
+        },
+        {
+          "max": 29.040000915527344,
+          "median": 2.232996940612793,
+          "mean": 2.81545352935791
+        },
+        {
+          "max": 26.047760009765625,
+          "median": 2.280363082885742,
+          "mean": 2.853443145751953
+        },
+        {
+          "max": 29.224197387695312,
+          "median": 2.422374963760376,
+          "mean": 3.0038580894470215
+        },
+        {
+          "max": 27.266815185546875,
+          "median": 2.9970791339874268,
+          "mean": 3.5665459632873535
+        },
+        {
+          "max": 31.396961212158203,
+          "median": 2.239579677581787,
+          "mean": 2.8719820976257324
+        },
+        {
+          "max": 28.125415802001953,
+          "median": 2.89229154586792,
+          "mean": 3.4309005737304688
+        }
+      ],
+      "mean_deviation": 3.0715790510177614,
+      "max_deviation": 31.560182571411133
+    },
+    {
+      "leg": "case3_norm_permute@layer13",
+      "case": "case3_norm_permute",
+      "layer": 13,
+      "self_consistent": true,
+      "cells": [
+        {
+          "max": 11.869450569152832,
+          "median": 0.44098448753356934,
+          "mean": 0.5763460993766785
+        },
+        {
+          "max": 9.64556884765625,
+          "median": 0.4144236445426941,
+          "mean": 0.5363707542419434
+        },
+        {
+          "max": 11.875606536865234,
+          "median": 0.3950052261352539,
+          "mean": 0.514837920665741
+        },
+        {
+          "max": 8.596742630004883,
+          "median": 0.4124460816383362,
+          "mean": 0.5436748266220093
+        },
+        {
+          "max": 7.881169319152832,
+          "median": 0.38625574111938477,
+          "mean": 0.4895975887775421
+        },
+        {
+          "max": 8.469034194946289,
+          "median": 0.40567731857299805,
+          "mean": 0.5316014885902405
+        },
+        {
+          "max": 10.024832725524902,
+          "median": 0.4209703207015991,
+          "mean": 0.5551587343215942
+        },
+        {
+          "max": 15.237457275390625,
+          "median": 0.43134206533432007,
+          "mean": 0.5800560712814331
+        },
+        {
+          "max": 7.126226902008057,
+          "median": 0.43317288160324097,
+          "mean": 0.5432065725326538
+        },
+        {
+          "max": 6.70953893661499,
+          "median": 0.4091019630432129,
+          "mean": 0.5205203890800476
+        },
+        {
+          "max": 6.744657516479492,
+          "median": 0.4025691747665405,
+          "mean": 0.5150558948516846
+        },
+        {
+          "max": 8.603989601135254,
+          "median": 0.3942525386810303,
+          "mean": 0.507387638092041
+        },
+        {
+          "max": 6.102412223815918,
+          "median": 0.3883887827396393,
+          "mean": 0.49136510491371155
+        },
+        {
+          "max": 11.087092399597168,
+          "median": 0.42685866355895996,
+          "mean": 0.5540764927864075
+        },
+        {
+          "max": 12.044750213623047,
+          "median": 0.37866783142089844,
+          "mean": 0.4848020672798157
+        },
+        {
+          "max": 10.870766639709473,
+          "median": 0.4664023518562317,
+          "mean": 0.6161436438560486
+        },
+        {
+          "max": 9.187262535095215,
+          "median": 0.38021427392959595,
+          "mean": 0.4836154878139496
+        },
+        {
+          "max": 7.747127532958984,
+          "median": 0.43134450912475586,
+          "mean": 0.5418060421943665
+        },
+        {
+          "max": 9.762349128723145,
+          "median": 0.3976529836654663,
+          "mean": 0.5081133246421814
+        },
+        {
+          "max": 7.874434947967529,
+          "median": 0.38920557498931885,
+          "mean": 0.4981648623943329
+        }
+      ],
+      "mean_deviation": 0.5295950502157212,
+      "max_deviation": 15.237457275390625
+    }
+  ],
+  "corruption_verification": {
+    "case1_qkv_head_permute@layer0": {
+      "case": "case1_qkv_head_permute",
+      "layer": 0,
+      "verified": true,
+      "expected_tensors": [
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.layers.0.self_attn.k_proj.weight"
+      ],
+      "changed_tensors": [
+        "model.layers.0.self_attn.k_proj.weight",
+        "model.layers.0.self_attn.q_proj.weight"
+      ],
+      "max_abs_delta": {
+        "model.layers.0.self_attn.k_proj.weight": 0.48974609375,
+        "model.layers.0.self_attn.q_proj.weight": 0.666015625
+      },
+      "checks": "exactly the tensors this case is defined to touch differ from the source, each by a non-zero amount, and no others differ"
+    },
+    "case1_qkv_head_permute@layer13": {
+      "case": "case1_qkv_head_permute",
+      "layer": 13,
+      "verified": true,
+      "expected_tensors": [
+        "model.layers.13.self_attn.q_proj.weight",
+        "model.layers.13.self_attn.k_proj.weight"
+      ],
+      "changed_tensors": [
+        "model.layers.13.self_attn.k_proj.weight",
+        "model.layers.13.self_attn.q_proj.weight"
+      ],
+      "max_abs_delta": {
+        "model.layers.13.self_attn.k_proj.weight": 0.341796875,
+        "model.layers.13.self_attn.q_proj.weight": 0.546875
+      },
+      "checks": "exactly the tensors this case is defined to touch differ from the source, each by a non-zero amount, and no others differ"
+    },
+    "case2_oproj_col_permute@layer0": {
+      "case": "case2_oproj_col_permute",
+      "layer": 0,
+      "verified": true,
+      "expected_tensors": [
+        "model.layers.0.self_attn.o_proj.weight"
+      ],
+      "changed_tensors": [
+        "model.layers.0.self_attn.o_proj.weight"
+      ],
+      "max_abs_delta": {
+        "model.layers.0.self_attn.o_proj.weight": 0.34716796875
+      },
+      "checks": "exactly the tensors this case is defined to touch differ from the source, each by a non-zero amount, and no others differ"
+    },
+    "case2_oproj_col_permute@layer13": {
+      "case": "case2_oproj_col_permute",
+      "layer": 13,
+      "verified": true,
+      "expected_tensors": [
+        "model.layers.13.self_attn.o_proj.weight"
+      ],
+      "changed_tensors": [
+        "model.layers.13.self_attn.o_proj.weight"
+      ],
+      "max_abs_delta": {
+        "model.layers.13.self_attn.o_proj.weight": 0.3896484375
+      },
+      "checks": "exactly the tensors this case is defined to touch differ from the source, each by a non-zero amount, and no others differ"
+    },
+    "case3_norm_permute@layer0": {
+      "case": "case3_norm_permute",
+      "layer": 0,
+      "verified": true,
+      "expected_tensors": [
+        "model.layers.0.input_layernorm.weight"
+      ],
+      "changed_tensors": [
+        "model.layers.0.input_layernorm.weight"
+      ],
+      "max_abs_delta": {
+        "model.layers.0.input_layernorm.weight": 0.87890625
+      },
+      "checks": "exactly the tensors this case is defined to touch differ from the source, each by a non-zero amount, and no others differ"
+    },
+    "case3_norm_permute@layer13": {
+      "case": "case3_norm_permute",
+      "layer": 13,
+      "verified": true,
+      "expected_tensors": [
+        "model.layers.13.input_layernorm.weight"
+      ],
+      "changed_tensors": [
+        "model.layers.13.input_layernorm.weight"
+      ],
+      "max_abs_delta": {
+        "model.layers.13.input_layernorm.weight": 5.2109375
+      },
+      "checks": "exactly the tensors this case is defined to touch differ from the source, each by a non-zero amount, and no others differ"
+    }
+  },
+  "excluded_legs": [],
+  "gate": {
+    "layer_0": {
+      "threshold": 0.033491623937152326,
+      "gate_margin": 2,
+      "clears": {
+        "case1_qkv_head_permute": true,
+        "case2_oproj_col_permute": true,
+        "case3_norm_permute": true
+      },
+      "verdict": "pass",
+      "layer": 0,
+      "cases": {
+        "case1_qkv_head_permute": 2.6192610025405885,
+        "case2_oproj_col_permute": 2.0848178923130036,
+        "case3_norm_permute": 3.0715790510177614
+      },
+      "weakest_case_ratio_to_gate": 31.124467064141236
+    },
+    "layer_13": {
+      "threshold": 0.033491623937152326,
+      "gate_margin": 2,
+      "clears": {
+        "case1_qkv_head_permute": true,
+        "case2_oproj_col_permute": true,
+        "case3_norm_permute": true
+      },
+      "verdict": "pass",
+      "layer": 13,
+      "cases": {
+        "case1_qkv_head_permute": 0.25395617857575414,
+        "case2_oproj_col_permute": 0.26587259992957113,
+        "case3_norm_permute": 0.5295950502157212
+      },
+      "weakest_case_ratio_to_gate": 3.791338679968278
+    }
+  },
+  "gate_carried_forward": {
+    "layer": 0,
+    "verdict": "pass",
+    "note": "This is the gate at one layer, not a general one. Phase 2a's depth sweep found the gate passes at layer 0 and fails at 7, 13, 20 and 27 as a step rather than a gradient; the layer 13 legs here reproduce that across the serving boundary. A failing verdict at layer 13 is a recorded result, not an unresolved defect."
+  },
+  "offset_vs_corruption": "Break means contain the serving-boundary offset as well as the corruption. The offset is the floor mean above; the corruption is orders larger at both layers, so the offset rounds the break means rather than confounding them.",
+  "patches": {
+    "names": [
+      "01-worker-extension-passthrough.patch",
+      "02-collective-rpc-route.patch"
+    ],
+    "sha256": {
+      "01-worker-extension-passthrough.patch": "4bff20d286835a41d11cbc99a7a29435b379d912fb866295fdf0d24755a217ee",
+      "02-collective-rpc-route.patch": "e08a2a959fd37497c0e6d392fbb03081dc28a591d8774ecad7bed5061ecf8a15"
+    },
+    "count": 2
+  },
+  "prime_rl_pin": {
+    "prime_rl_commit": "26b3131d2716a4f8210b165df584b83b4bc54f61",
+    "prime_rl_tag": "v0.9.1.dev41",
+    "prime_rl_pinned_date": "2026-09-04",
+    "vllm_version": "0.28.0",
+    "source": "https://api.github.com/repos/PrimeIntellect-ai/prime-rl/tarball/26b3131d2716a4f8210b165df584b83b4bc54f61"
+  },
+  "environment": {
+    "python": "3.12.3",
+    "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.39",
+    "machine": "x86_64",
+    "model": "Qwen/Qwen3-0.6B",
+    "pinned_vllm_version": "0.28.0",
+    "dtype": "torch.bfloat16",
+    "torch": "2.13.0+cu130",
+    "cuda_available": true,
+    "gpu_count": 2,
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "cuda_version": "13.0",
+    "driver_version": "595.91.07",
+    "vllm_installed_version": "0.28.0",
+    "git_commit": "b038269ca62d2bec102ee0c08e1afb81ed3673c0",
+    "numpy": "2.3.5",
+    "install": [
+      "uv venv --python 3.12 .venv-phase3",
+      "uv pip install --python .venv-phase3 vllm==0.28.0 safetensors huggingface-hub",
+      "uv pip install --python .venv-phase3 -e . --no-deps"
+    ]
+  },
+  "environment_provenance": "Rebuilt from scratch after a pod restart wiped container disk: uv venv at /opt/wsb/venv-phase3, vLLM 0.28.0, the prime-rl pin installed EDITABLE (a non-editable install copies the source and the two patches never reach the imported module), five submodules fetched at their pinned SHAs, both patches applied, ninja on PATH for FlashInfer warm-up. Not the environment the earlier phase 3 artifacts were produced on.",
+  "environment_snapshot": {
+    "attempted": true,
+    "succeeded": false,
+    "command": "tar czf /workspace/venv-phase3.tar.gz -C /opt/wsb venv-phase3",
+    "failure": "gzip: stdout: Disk quota exceeded",
+    "bytes_written_before_failure": 3221225472,
+    "venv_size_uncompressed_bytes": 8268314624,
+    "note": "The network volume reports 161T free, so this is a per-account quota rather than volume exhaustion. The truncated 3.0 GiB partial was deleted: a file of that name would be taken for a restorable snapshot and is not one. Not worked around -- not split, not thinned, not moved off the volume."
+  }
+}

@@ -27,6 +27,11 @@ from weight_sync_bench.phase3 import engine_probe
 
 TRANSPORTS = sorted(engine_probe.PRIME_RL_WORKER_EXTENSIONS)
 
+# The transports this project actually binds a composed worker for. A missing
+# optional dependency may excuse any other transport from the prime-rl-gated
+# assertions below; it may never excuse these two.
+BOUND_TRANSPORTS = ("filesystem", "nccl")
+
 
 def test_more_than_one_transport_exists_to_distinguish():
     """Everything below is vacuous with a single transport, and the defect this
@@ -73,8 +78,42 @@ def prime_rl():
     )
 
 
+def _require_importable(transport):
+    """Skip a transport whose prime-rl worker needs an optional dependency.
+
+    `nixl`'s worker imports `modelexpress`, which is an extra rather than a
+    prime-rl requirement. A transport whose BASE class will not import is an
+    environment fact, not a composition defect, and failing on it would say the
+    composition is broken when nothing about the composition was exercised.
+    `filesystem` and `nccl` are the two this project actually binds and they are
+    never skipped here -- see the guard below.
+    """
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+
+    try:
+        resolve_obj_by_qualname(engine_probe.PRIME_RL_WORKER_EXTENSIONS[transport])
+    except ImportError as exc:
+        if transport in BOUND_TRANSPORTS:
+            raise
+        pytest.skip(f"prime-rl's {transport} worker needs an optional dependency: {exc}")
+
+
+def _importable(transports, prime_rl):
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+
+    out = []
+    for transport in transports:
+        try:
+            resolve_obj_by_qualname(engine_probe.PRIME_RL_WORKER_EXTENSIONS[transport])
+        except ImportError:
+            continue
+        out.append(transport)
+    return out
+
+
 @pytest.mark.parametrize("transport", TRANSPORTS)
 def test_composed_class_carries_both_parents(transport, prime_rl):
+    _require_importable(transport)
     from vllm.utils.import_utils import resolve_obj_by_qualname
 
     from weight_sync_bench.phase2.collective_logits import LogitsHookWorkerExtension
@@ -89,6 +128,7 @@ def test_composed_class_carries_both_parents(transport, prime_rl):
 def test_the_qualname_resolves_to_the_class_it_names(transport, prime_rl):
     """The qualname is the only thing that travels to a spawned worker, so the
     name resolving to the right class is the whole attachment."""
+    _require_importable(transport)
     from vllm.utils.import_utils import resolve_obj_by_qualname
 
     qualname = engine_probe.composed_worker_qualname(transport)
@@ -98,12 +138,15 @@ def test_the_qualname_resolves_to_the_class_it_names(transport, prime_rl):
 
 
 def test_the_transports_resolve_to_distinct_classes(prime_rl):
-    classes = [engine_probe.compose_worker_extension(t) for t in TRANSPORTS]
-    assert len({id(c) for c in classes}) == len(TRANSPORTS)
+    usable = _importable(TRANSPORTS, prime_rl)
+    assert set(BOUND_TRANSPORTS) <= set(usable), usable
+    classes = [engine_probe.compose_worker_extension(t) for t in usable]
+    assert len({id(c) for c in classes}) == len(usable)
 
 
 @pytest.mark.parametrize("transport", TRANSPORTS)
 def test_bind_writes_the_transports_own_qualname(transport, prime_rl, monkeypatch):
+    _require_importable(transport)
     """The key and the value have to agree about the transport. Binding the bare
     name under the NCCL key is the defect: it installs the filesystem
     composition on a run that will call `init_broadcaster` with NCCL's
@@ -129,6 +172,7 @@ def test_binding_one_transport_leaves_the_other_alone(prime_rl, monkeypatch):
 
 @pytest.mark.parametrize("transport", TRANSPORTS)
 def test_check_composition_reports_the_transport_it_composed(transport, prime_rl):
+    _require_importable(transport)
     """The committed attachment artifact recorded the bare name beside an MRO
     ending in Filesystem. A name that does not match the class beside it makes
     the record unreadable, so the name is asserted against the MRO here."""
