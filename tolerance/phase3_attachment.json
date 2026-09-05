@@ -1,0 +1,254 @@
+{
+  "probe": "live prime-rl server attachment",
+  "question": "Can phase 2's logit-extraction path be attached to a running prime-rl server, and does a policy update complete with it in place?",
+  "base_url": "http://localhost:8000",
+  "model_dir": "/workspace/hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+  "patches": {
+    "names": [
+      "01-worker-extension-passthrough.patch",
+      "02-collective-rpc-route.patch"
+    ],
+    "sha256": {
+      "01-worker-extension-passthrough.patch": "4bff20d286835a41d11cbc99a7a29435b379d912fb866295fdf0d24755a217ee",
+      "02-collective-rpc-route.patch": "e08a2a959fd37497c0e6d392fbb03081dc28a591d8774ecad7bed5061ecf8a15"
+    },
+    "count": 2,
+    "boundary": "The attachment is exactly these two. Anything further is reported rather than built, because an accumulating patch set against a pinned third party is a fork, and a fork of the system under measurement invalidates the measurement."
+  },
+  "forwardable_rpc_methods": [
+    "get_scheduler_config_summary",
+    "install_logits_hook",
+    "retrieve_and_clear_logits",
+    "uninstall_logits_hook"
+  ],
+  "prime_rl_pin": {
+    "prime_rl_commit": "26b3131d2716a4f8210b165df584b83b4bc54f61",
+    "prime_rl_tag": "v0.9.1.dev41",
+    "prime_rl_pinned_date": "2026-09-04",
+    "vllm_version": "0.28.0",
+    "source": "https://api.github.com/repos/PrimeIntellect-ai/prime-rl/tarball/26b3131d2716a4f8210b165df584b83b4bc54f61"
+  },
+  "environment": {
+    "python": "3.12.3",
+    "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.39",
+    "machine": "x86_64",
+    "model": "Qwen/Qwen3-0.6B",
+    "pinned_vllm_version": "0.28.0",
+    "dtype": "torch.bfloat16",
+    "torch": "2.13.0+cu130",
+    "cuda_available": true,
+    "gpu_count": 1,
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "cuda_version": "13.0",
+    "driver_version": "595.91.07",
+    "vllm_installed_version": "0.28.0",
+    "git_commit": "ca40fadfb5ede628ed198f6eee8c5492f0fd6b50",
+    "numpy": "2.3.5",
+    "install": [
+      "uv venv --python 3.12 .venv-phase3",
+      "uv pip install --python .venv-phase3 vllm==0.28.0 safetensors huggingface-hub",
+      "uv pip install --python .venv-phase3 -e . --no-deps"
+    ]
+  },
+  "outcome": "checks_ran",
+  "check_0_chunked_prefill_off": {
+    "resolved": {
+      "max_num_batched_tokens": 40960,
+      "chunked_prefill_enabled": false,
+      "enable_prefix_caching": false
+    },
+    "chunking_evidence": {
+      "resolved_max_num_batched_tokens": 40960,
+      "resolved_chunked_prefill_enabled": false,
+      "prompt_len": 32,
+      "budget_below_prompt_len": false,
+      "expected_chunks": 1,
+      "config_predicts_chunking": false
+    },
+    "prefix_caching_enabled": false,
+    "extraction_can_work": true,
+    "blockers": [],
+    "source": "collective_rpc get_scheduler_config_summary, forwarded by the added route to the server's workers -- the resolved config inside the worker processes, not the request that configured them and not a locally constructed engine",
+    "passed": true
+  },
+  "check_1_attachment": {
+    "bit_identical": false,
+    "served_self_consistent": true,
+    "server_scheduler_summary": {
+      "max_num_batched_tokens": 40960,
+      "chunked_prefill_enabled": false,
+      "enable_prefix_caching": false
+    },
+    "direct_scheduler_summary": {
+      "max_num_batched_tokens": 40960,
+      "chunked_prefill_enabled": false,
+      "enable_prefix_caching": false
+    },
+    "resolved_configs_agree": true,
+    "mean_deviation": 0.0023245790507644415,
+    "floor_mean_reference": {
+      "artifact": "phase2a_bf16_floor_v2.json",
+      "repetitions": 20,
+      "batch": 4,
+      "seq_len": 32,
+      "mean_deviation": 0.03725002110004425
+    },
+    "multiple_of_floor_mean": 0.0624047713831142,
+    "prompts": 4,
+    "seq_len": 32,
+    "seed": 0,
+    "per_prompt": [
+      {
+        "prompt": 0,
+        "bit_identical": false,
+        "shape": [
+          31,
+          151936
+        ],
+        "max_abs_diff": 0.05997467041015625,
+        "mean_abs_diff": 0.0024825672153383493
+      },
+      {
+        "prompt": 1,
+        "bit_identical": false,
+        "shape": [
+          31,
+          151936
+        ],
+        "max_abs_diff": 0.062091827392578125,
+        "mean_abs_diff": 0.002311478368937969
+      },
+      {
+        "prompt": 2,
+        "bit_identical": false,
+        "shape": [
+          31,
+          151936
+        ],
+        "max_abs_diff": 0.031246185302734375,
+        "mean_abs_diff": 0.0022613576147705317
+      },
+      {
+        "prompt": 3,
+        "bit_identical": false,
+        "shape": [
+          31,
+          151936
+        ],
+        "max_abs_diff": 0.037395477294921875,
+        "mean_abs_diff": 0.0022429130040109158
+      }
+    ],
+    "max_abs_diff": 0.062091827392578125,
+    "matched_flags": {
+      "dtype": "bfloat16",
+      "enforce_eager": true,
+      "enable_chunked_prefill": false,
+      "enable_prefix_caching": false,
+      "max_num_batched_tokens": 40960,
+      "gpu_memory_utilization": 0.85,
+      "logprobs_mode": "raw_logits",
+      "seed": 0,
+      "tensor_parallel_size": 1
+    },
+    "unmatchable": {
+      "serving_path": "The served side runs vLLM's OpenAI API server over an async engine reached by HTTP; the direct side is a synchronous in-process LLM. That difference IS what check 1 measures, so it cannot be matched away."
+    },
+    "served_side": "prime-rl server, logits read through the added route",
+    "direct_side": "in-process vLLM LLM in a subprocess, same flags",
+    "passed": false
+  },
+  "check_2_policy_update": {
+    "passed": true,
+    "compared_steps": [
+      0,
+      1
+    ],
+    "all_published_steps": [
+      0,
+      1
+    ],
+    "num_changed": 253,
+    "num_unchanged": 58,
+    "num_parameters_compared": 311,
+    "largest_deltas": [
+      {
+        "param": "lm_head.weight",
+        "max_abs_delta": 3.814697265625e-06,
+        "mean_abs_delta": 1.0111567583237502e-08
+      },
+      {
+        "param": "model.embed_tokens.weight",
+        "max_abs_delta": 3.814697265625e-06,
+        "mean_abs_delta": 1.0111567583237502e-08
+      },
+      {
+        "param": "model.layers.0.mlp.down_proj.weight",
+        "max_abs_delta": 3.814697265625e-06,
+        "mean_abs_delta": 1.1080711459499071e-07
+      },
+      {
+        "param": "model.layers.0.mlp.gate_proj.weight",
+        "max_abs_delta": 3.814697265625e-06,
+        "mean_abs_delta": 8.381339711149849e-08
+      },
+      {
+        "param": "model.layers.0.mlp.up_proj.weight",
+        "max_abs_delta": 3.814697265625e-06,
+        "mean_abs_delta": 1.1535536259543733e-07
+      }
+    ],
+    "artifact": "phase3_step_runner.json"
+  },
+  "check_3_prime_rl_rpcs": {
+    "routes": {
+      "liveness": {
+        "status_code": 200,
+        "body": {
+          "status": "ok"
+        }
+      },
+      "update_weights": {
+        "status_code": 200,
+        "body": {
+          "status": "ok"
+        }
+      }
+    },
+    "weight_dir": "/workspace/hf/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+    "note": "liveness_probe and update_weights_from_path are prime-rl's own worker methods, present only through the composed class's prime-rl parent; reaching them is what shows the subclassing did not break what it subclasses",
+    "passed": true
+  },
+  "check_4_composition": {
+    "resolved_by_qualname": true,
+    "qualname": "weight_sync_bench.phase3.engine_probe.PrimeRlLogitsHookWorker",
+    "mro": [
+      "weight_sync_bench.phase3.engine_probe.PrimeRlLogitsHookWorkerFilesystem",
+      "weight_sync_bench.phase2.collective_logits.LogitsHookWorkerExtension",
+      "prime_rl.inference.vllm.worker.filesystem.FileSystemWeightUpdateWorker",
+      "builtins.object"
+    ],
+    "prime_rl_base": "prime_rl.inference.vllm.worker.filesystem.FileSystemWeightUpdateWorker",
+    "prime_rl_base_in_mro": true,
+    "logits_hook_in_mro": true,
+    "prime_rl_methods": [
+      "init_broadcaster",
+      "liveness_probe",
+      "update_weights_from_path"
+    ],
+    "logits_hook_methods": [
+      "install_logits_hook",
+      "retrieve_and_clear_logits",
+      "uninstall_logits_hook"
+    ],
+    "missing_methods": [],
+    "passed": true
+  },
+  "summary": {
+    "check_0_chunked_prefill_off": true,
+    "check_1_attachment": false,
+    "check_2_policy_update": true,
+    "check_3_prime_rl_rpcs": true,
+    "check_4_composition": true
+  }
+}

@@ -1011,7 +1011,7 @@ configured transport's entry to a class subclassing both prime-rl's weight-updat
 logits-hook extension, then start the server. Composition by subclassing is forced, since the
 field names exactly one class. The alternative, making prime-rl's overwrite conditional, is one
 line but has to be carried as a patch against a pinned third party. Exercising the launcher
-against a running server is the remaining feasibility question.
+against a running server is what settles it, and that has now been run; the result is below.
 
 What is still worth measuring on a GPU is narrower and separable: whether prime-rl's engine
 flags change the logits the correctness gate reads. prime-rl leaves chunked prefill and prefix
@@ -1050,7 +1050,40 @@ The probe also establishes the hardware floor for everything after it. prime-rl 
 and inference into distinct processes with distinct GPUs, so its smallest end-to-end loop is one
 trainer GPU plus one inference GPU. There is no single-GPU end-to-end configuration.
 
-Nothing in 2c through 2e is built until this resolves.
+**Measured: the attachment holds. Bit-identity across the serving boundary does not.** With the
+two patches applied, the extraction path attaches to a running prime-rl server. The engine flags
+were read back off the server's own worker processes through the added route rather than inferred
+from what was passed in (chunked prefill off, prefix caching off, batched-token budget 40960),
+which also demonstrates both patches at once: the method read back exists only on the composed
+class, and only the added route reaches it. prime-rl's own weight-update RPCs still answer
+through that class, its MRO carries both parents against the real base, and one policy update
+completes with 253 of 311 parameters moving between published versions. The 58 that do not move
+are all norm weights, and at this learning rate they cannot: a bf16 ULP at 1.0 is 2^-8 while the
+update is on the order of 1e-6. Turning chunked prefill off through configuration works but needs
+an explicit batched-token budget, because the server path defaults that budget to 2048 with
+chunking off and then refuses to start against a longer maximum sequence length. No third patch
+was needed.
+
+The one check that fails is bit-identity between the served path and a directly constructed
+engine at matched flags, and it is a result about the acceptance rather than about the
+attachment. Both engines are deterministic, the same prompt twice off the same server being
+bit-identical, and their resolved configurations agree field for field. Their logits still differ
+by 2.3e-3 in the mean and 6.2e-2 at the worst element, roughly a sixteenth of the mean deviation
+the TP1 against TP2 floor already admits. That is the signature of a reduction-order difference,
+not of a divergent computation.
+
+Bit-identity was the stated acceptance on the premise that matched engine flags imply matched
+arithmetic. The measurement refutes the premise: matching every flag the two engines expose does
+not make the serving path arithmetically identical to the in-process path. So this comparison
+gates on a threshold, and a threshold gates on the comparison it was measured against. The 2a
+floor is not that measurement. It is TP1 against TP2 inside one process, a different quantity,
+and dividing this deviation by it would repeat exactly the error the flag-profile rule was built
+to avoid. What phase 3 needs before it gates anything is a serving-boundary floor measured the
+way every other floor here was measured, with the break-case injections run through the served
+path to show the separation still holds.
+
+The attachment question is resolved, so 2c through 2e are unblocked on design. The serving-boundary
+floor is what stands between them and a gate, and it is a measurement rather than a decision.
 
 ### 3b. 2c through 2e, against the engine the probe validated
 

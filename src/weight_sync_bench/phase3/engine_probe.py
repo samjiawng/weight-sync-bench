@@ -317,22 +317,61 @@ def compose_worker_extension(broadcast_type: str = DEFAULT_BROADCAST_TYPE) -> ty
     # means `getattr(this_module, COMPOSED_WORKER_NAME)` has to return this
     # class. Bind it so the module-level __getattr__ below finds it.
     composed.__module__ = __name__
-    composed.__qualname__ = COMPOSED_WORKER_NAME
+    # Named for its transport so a traceback, a repr, or an artifact says which
+    # composition is bound rather than leaving every transport looking alike.
+    composed.__qualname__ = f"{COMPOSED_WORKER_NAME}{broadcast_type.capitalize()}"
     _composed_cache[broadcast_type] = composed
     return composed
 
 
+def composed_worker_qualname(broadcast_type: str = DEFAULT_BROADCAST_TYPE) -> str:
+    """The qualname to hand vLLM for one weight-broadcast transport.
+
+    THE TRANSPORT IS PART OF THE NAME, and that is not cosmetic. A worker
+    extension is named by exactly ONE qualname, which resolves to exactly ONE
+    class, built on exactly ONE of prime-rl's transport workers -- so a single
+    name cannot follow whatever transport the server was configured with.
+
+    Getting this wrong does not fail at bind time. It fails much later, in
+    prime-rl's own weight-update path, with a message about arity: prime-rl's
+    `/init_broadcaster` route calls `init_broadcaster` with seven arguments,
+    which is NCCLWeightUpdateWorker's signature, while
+    FileSystemWeightUpdateWorker.init_broadcaster takes none. Binding the
+    filesystem composition to an NCCL-configured run therefore dies with
+    "init_broadcaster() takes 1 positional argument but 8 were given" -- an
+    error that names the method rather than the transport mismatch that caused
+    it. Measured, not predicted: `rl` auto-selects NCCL for any run with an
+    inference server and no LoRA (`configs/rl.py`, `auto_setup_weight_broadcast`),
+    while this module's default is filesystem, so the default is exactly wrong
+    for the entry point the RL loop uses.
+    """
+    if broadcast_type not in PRIME_RL_WORKER_EXTENSIONS:
+        raise ValueError(
+            f"unknown weight-broadcast transport {broadcast_type!r}; "
+            f"expected one of {sorted(PRIME_RL_WORKER_EXTENSIONS)}"
+        )
+    return f"{__name__}.{COMPOSED_WORKER_NAME}{broadcast_type.capitalize()}"
+
+
 def __getattr__(name: str) -> Any:
-    """PEP 562 hook so `PrimeRlLogitsHookWorker` resolves by qualname without a
+    """PEP 562 hook so the composed classes resolve by qualname without a
     module-level prime-rl import.
 
     vLLM's `resolve_obj_by_qualname` does `getattr(module, name)` inside each
     worker process. Building the class here keeps this module importable on a
     CPU-only box with neither prime-rl nor vLLM installed, which is the
     discipline the whole package follows.
+
+    Both the bare name and the per-transport names resolve. The bare name keeps
+    meaning the filesystem composition, which is what the standalone server
+    path uses and what the flag differential recorded; a run on another
+    transport must ask for that transport by name.
     """
     if name == COMPOSED_WORKER_NAME:
         return compose_worker_extension()
+    for broadcast_type in PRIME_RL_WORKER_EXTENSIONS:
+        if name == f"{COMPOSED_WORKER_NAME}{broadcast_type.capitalize()}":
+            return compose_worker_extension(broadcast_type)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

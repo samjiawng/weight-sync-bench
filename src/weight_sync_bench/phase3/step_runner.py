@@ -21,8 +21,8 @@ module at all.
 WHAT IS READ, AND WHY THAT SIGNAL
 ----------------------------------
 The trainer publishes each policy version through its weight-broadcast
-transport. Under the default transport (`filesystem`) that is a directory tree
-the trainer writes and the inference server reads:
+transport. Under the `filesystem` transport that is a directory tree the
+trainer writes and the inference server reads:
 
     <output_dir>/broadcasts/step_<N>/     sharded safetensors + index
     <output_dir>/broadcasts/step_<N>/.sender_ready    written last
@@ -37,6 +37,33 @@ complete shards.
 The steps present are DISCOVERED, never assumed. How many versions a given
 `max_steps` publishes depends on prime-rl's own scheduling, which this module
 does not model; asserting a count here would be a guess dressed as a check.
+
+THE TRANSPORT HAS TO BE `filesystem`, AND IT IS NOT THE DEFAULT
+---------------------------------------------------------------
+This comparison exists only under `filesystem`. Under `nccl` and `nixl` the
+weights never touch disk -- they go directly between processes -- and the step
+directories hold nothing but zero-byte synchronisation markers (`.started`,
+`.sender_ready`, `.receiver_ready`, `.finished`, measured). Two steps still
+appear and `published_steps` still returns them, so the shortfall is NOT the
+"fewer than two steps" case: it is two real published versions carrying no
+readable weights.
+
+And `filesystem` is not what `rl` picks. `RLConfig.auto_setup_weight_broadcast`
+(`packages/prime-rl-configs/src/prime_rl/configs/rl.py`) selects NCCL for any
+run that has an inference server and no LoRA, falling back to filesystem only
+otherwise -- so the RL entry point's effective default is the one transport
+this module cannot read. Pass `--weight-broadcast.type filesystem` to compare
+published weights, and match the composed worker extension to that same
+transport (see `engine_probe.composed_worker_qualname`): the transport is part
+of the worker's identity, and a mismatch fails inside prime-rl's own
+weight-update path rather than at bind time.
+
+What that costs is worth stating plainly: it measures a policy update carried
+by the filesystem transport, not by the NCCL transport an unconfigured `rl`
+would use. The question here is whether the trainer's parameters MOVED, which
+is a property of the optimizer step rather than of the transport that ships
+it, so the substitution is sound for this check and would not be sound for a
+check about the transport itself.
 """
 
 from __future__ import annotations
@@ -85,16 +112,26 @@ def rl_command(
     environment the command runs in -- which on the GPU box it is, and on this
     development box it deliberately is not.
 
-    The two override flags are the assumption most likely to need correcting on
-    first contact: prime-rl's CLI is derived from its pydantic config tree, and
-    while `max_steps` and `output_dir` are both top-level fields, the exact
-    dashed spelling has not been verified by execution here. `extra_args` is
-    the escape hatch, and the artifact records the command verbatim so a
-    mismatch is visible in the artifact rather than only in a shell.
+    The config is passed as `@ <path>`, which is prime-rl's own spelling and
+    not argparse's: its CLI comes from pydantic-config, whose usage line is
+    `rl [-h] [@ FILE] [OPTIONS]`, and whose documented invocation is
+    `uv run rl @ configs/basic/reverse-text/rl.toml`. An earlier version of this
+    function passed `--config <path>` and prime-rl rejected it with "Extra
+    inputs are not permitted", then reported `trainer` and `orchestrator` as
+    missing -- because with the config file never loaded, every field it would
+    have supplied was absent. That failure mode is worth naming: the error names
+    the fields the config would have filled in, not the argument that failed to
+    load it, so it reads like a config-content problem rather than a config-
+    loading one.
+
+    `max_steps` and `output_dir` ARE ordinary `--dashed` options, verified
+    against `rl --help` on the box. `extra_args` is the escape hatch for the
+    vLLM passthrough, and the artifact records the command verbatim so any
+    remaining mismatch is visible there rather than only in a shell.
     """
     return [
         "rl",
-        "--config",
+        "@",
         str(config_path),
         "--max-steps",
         str(max_steps),
@@ -104,9 +141,41 @@ def rl_command(
     ]
 
 
+def resolve_run_dir(output_dir: Path) -> Path:
+    """The directory prime-rl actually wrote this run into.
+
+    `--output-dir` is the directory that GROUPS runs, not the run itself:
+    prime-rl derives a per-run name from the taskset and model and writes
+    `<output_dir>/<run-name>/broadcasts/...` (observed:
+    `reverse-text--qwen3-0.6b-reverse-text-sft--e13d7a55`). Reading
+    `<output_dir>/broadcasts` directly finds nothing and reports "no published
+    steps", which would look like the trainer never published rather than like
+    this function looking in the wrong place -- a wrong answer, not an error.
+
+    Both layouts are accepted because a caller may point straight at a run
+    directory. Ambiguity is NOT resolved by guessing: more than one candidate
+    raises, since picking one would silently compare the wrong run's weights.
+    """
+    output_dir = Path(output_dir)
+    if (output_dir / BROADCAST_SUBDIR).is_dir():
+        return output_dir
+    candidates = sorted(
+        child for child in output_dir.iterdir()
+        if child.is_dir() and (child / BROADCAST_SUBDIR).is_dir()
+    ) if output_dir.is_dir() else []
+    if len(candidates) > 1:
+        raise StepRunnerError(
+            f"{output_dir} groups {len(candidates)} runs with a "
+            f"{BROADCAST_SUBDIR}/ directory ({[c.name for c in candidates]}); "
+            "point --output-dir at one run, or use a fresh directory per run. "
+            "Refusing to guess which one this invocation produced."
+        )
+    return candidates[0] if candidates else output_dir
+
+
 def published_steps(output_dir: Path) -> list[int]:
     """Step numbers the trainer has declared complete, ascending."""
-    broadcast_dir = Path(output_dir) / BROADCAST_SUBDIR
+    broadcast_dir = resolve_run_dir(Path(output_dir)) / BROADCAST_SUBDIR
     if not broadcast_dir.is_dir():
         return []
     steps = []
@@ -122,7 +191,7 @@ def published_steps(output_dir: Path) -> list[int]:
 
 
 def step_dir(output_dir: Path, step: int) -> Path:
-    return Path(output_dir) / BROADCAST_SUBDIR / f"{STEP_PREFIX}{step}"
+    return resolve_run_dir(Path(output_dir)) / BROADCAST_SUBDIR / f"{STEP_PREFIX}{step}"
 
 
 def load_step_weights(directory: Path) -> dict[str, "Any"]:
@@ -138,7 +207,18 @@ def load_step_weights(directory: Path) -> dict[str, "Any"]:
         # likely to take, not a fallback for an exotic case.
         shards = sorted(p.name for p in directory.glob("*.safetensors"))
         if not shards:
-            raise StepRunnerError(f"no safetensors and no index under {directory}")
+            markers = sorted(p.name for p in directory.iterdir() if p.name.startswith("."))
+            raise StepRunnerError(
+                f"no safetensors and no index under {directory}"
+                + (
+                    f"; it holds only {markers}, which is what a non-filesystem "
+                    "weight-broadcast transport leaves behind -- the weights went "
+                    "directly between processes and were never written. Re-run with "
+                    "--weight-broadcast.type filesystem (see this module's docstring)."
+                    if markers
+                    else ""
+                )
+            )
 
     # Imported after discovery: finding that a step published nothing is a
     # complete answer on its own and should not need the reader library to be
@@ -264,7 +344,7 @@ def run_probe(
     if len(steps) < 2:
         raise StepRunnerError(
             f"need two published steps to compare, found {steps or 'none'} under "
-            f"{Path(output_dir) / BROADCAST_SUBDIR}. The run itself succeeded, so this "
+            f"{resolve_run_dir(Path(output_dir)) / BROADCAST_SUBDIR}. The run itself succeeded, so this "
             f"is about how many versions max_steps={max_steps} publishes, not a crash."
         )
     before_step, after_step = steps[0], steps[1]
@@ -278,6 +358,7 @@ def run_probe(
         "question": "Does one step of prime-rl's smallest loop actually update the policy?",
         "config": RL_CONFIG_RELPATH,
         "max_steps": max_steps,
+        "run_dir": str(resolve_run_dir(Path(output_dir))),
         "compared_steps": [before_step, after_step],
         "all_published_steps": steps,
         "comparison": comparison,
